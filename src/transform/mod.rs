@@ -162,18 +162,20 @@ impl SSETransformer {
         &mut self,
         envelope: &EventEnvelope,
     ) -> Result<TransformResult, TransformError> {
+        // Always reset per-response state on response.created, even if
+        // the payload is malformed — prevents stale state leaking across responses.
+        self.reset_response_state();
+
         let payload: upstream::CreatedPayload = match serde_json::from_value(envelope.extra.clone())
         {
             Ok(p) => p,
             Err(_) => return Ok(TransformResult::Swallowed),
         };
 
-        if payload.response.id.is_empty() {
-            return Ok(TransformResult::Swallowed);
+        if !payload.response.id.is_empty() {
+            self.response_id = format!("chatcmpl-{}", payload.response.id);
         }
 
-        self.response_id = format!("chatcmpl-{}", payload.response.id);
-        self.reset_response_state();
         Ok(TransformResult::Swallowed)
     }
 
