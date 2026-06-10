@@ -15,6 +15,28 @@ pub enum TransformError {
     MarshalError(String),
 }
 
+/// Result of transforming a single upstream SSE event.
+///
+/// Distinguishes three semantically different states that the Go implementation
+/// conflated into a single `(bytes, bool)` pair:
+///
+/// - `Emitted`: bytes to send downstream
+/// - `Swallowed`: event was handled but produced no output (relay may keepalive)
+/// - `Done`: stream is complete, relay must emit `[DONE]` sentinel
+///
+/// See ADR 002 for rationale.
+#[derive(Debug)]
+pub enum TransformResult {
+    /// Bytes to emit downstream (one or more `data:` frames, newline-separated).
+    Emitted(Vec<u8>),
+    /// Upstream event was handled but produced no downstream output.
+    /// The relay should consider emitting an SSE keepalive comment if
+    /// the idle interval has elapsed.
+    Swallowed,
+    /// Stream is complete. The relay must emit `data: [DONE]\n\n`.
+    Done,
+}
+
 /// Stateful SSE transformer converting upstream Codex events into
 /// OpenAI chat-completion chunk JSON. Single-stream, no locking.
 pub struct SSETransformer {
@@ -89,13 +111,13 @@ impl SSETransformer {
         serde_json::to_vec(&chunk).map_err(|e| TransformError::MarshalError(e.to_string()))
     }
 
-    pub fn transform(&mut self, data: &[u8]) -> Result<(Vec<u8>, bool), TransformError> {
+    pub fn transform(&mut self, data: &[u8]) -> Result<TransformResult, TransformError> {
         let trimmed = data.trim_ascii();
         if trimmed.is_empty() {
-            return Ok((Vec::new(), false));
+            return Ok(TransformResult::Swallowed);
         }
         if trimmed == b"[DONE]" {
-            return Ok((Vec::new(), true));
+            return Ok(TransformResult::Done);
         }
 
         let envelope: EventEnvelope = serde_json::from_slice(trimmed)
@@ -116,30 +138,30 @@ impl SSETransformer {
             "response.function_call_arguments.delta" => {
                 self.handle_function_call_args_delta(&envelope, seq)
             }
-            // Explicitly ignored: no emission, not done
+            // Explicitly ignored: handled but no emission
             "response.function_call_arguments.done"
             | "response.output_item.done"
-            | "response.output_text.done" => Ok((Vec::new(), false)),
-            // Unknown events: no-op
-            _ => Ok((Vec::new(), false)),
+            | "response.output_text.done" => Ok(TransformResult::Swallowed),
+            // Unknown events: handled but no emission
+            _ => Ok(TransformResult::Swallowed),
         }
     }
 
     fn handle_created(
         &mut self,
         envelope: &EventEnvelope,
-    ) -> Result<(Vec<u8>, bool), TransformError> {
+    ) -> Result<TransformResult, TransformError> {
         let payload: upstream::CreatedPayload = serde_json::from_value(envelope.extra.clone())
             .map_err(|e| TransformError::InvalidJson(e.to_string()))?;
         self.response_id = format!("chatcmpl-{}", payload.response.id);
-        Ok((Vec::new(), false))
+        Ok(TransformResult::Swallowed)
     }
 
     fn handle_text_delta(
         &mut self,
         envelope: &EventEnvelope,
         seq: Option<u64>,
-    ) -> Result<(Vec<u8>, bool), TransformError> {
+    ) -> Result<TransformResult, TransformError> {
         let payload: upstream::OutputTextDeltaPayload =
             serde_json::from_value(envelope.extra.clone())
                 .map_err(|e| TransformError::InvalidJson(e.to_string()))?;
@@ -159,14 +181,14 @@ impl SSETransformer {
             None,
         )?;
         chunks.push(bytes);
-        Ok((chunks.join(&b'\n'), false))
+        Ok(TransformResult::Emitted(chunks.join(&b'\n')))
     }
 
     fn handle_completed(
         &mut self,
         envelope: &EventEnvelope,
         seq: Option<u64>,
-    ) -> Result<(Vec<u8>, bool), TransformError> {
+    ) -> Result<TransformResult, TransformError> {
         let payload: upstream::CompletedPayload = serde_json::from_value(envelope.extra.clone())
             .map_err(|e| TransformError::InvalidJson(e.to_string()))?;
 
@@ -182,25 +204,25 @@ impl SSETransformer {
         });
 
         let bytes = self.make_chunk(seq, ChunkDelta::default(), Some(finish), usage)?;
-        Ok((bytes, false))
+        Ok(TransformResult::Emitted(bytes))
     }
 
     fn handle_reasoning(
         &mut self,
         envelope: &EventEnvelope,
         seq: Option<u64>,
-    ) -> Result<(Vec<u8>, bool), TransformError> {
+    ) -> Result<TransformResult, TransformError> {
         // Only process the first reasoning item (output_index: 0)
         if envelope.output_index().unwrap_or(0) > 0 {
-            return Ok((Vec::new(), false));
+            return Ok(TransformResult::Swallowed);
         }
         // Only process .delta events
         if !envelope.event_type.contains(".delta") {
-            return Ok((Vec::new(), false));
+            return Ok(TransformResult::Swallowed);
         }
         let reasoning_text = match envelope.extract_reasoning_content() {
             Some(t) => t,
-            None => return Ok((Vec::new(), false)),
+            None => return Ok(TransformResult::Swallowed),
         };
 
         let mut chunks = Vec::new();
@@ -218,25 +240,25 @@ impl SSETransformer {
             None,
         )?;
         chunks.push(bytes);
-        Ok((chunks.join(&b'\n'), false))
+        Ok(TransformResult::Emitted(chunks.join(&b'\n')))
     }
 
     fn handle_output_item_added(
         &mut self,
         envelope: &EventEnvelope,
         seq: Option<u64>,
-    ) -> Result<(Vec<u8>, bool), TransformError> {
+    ) -> Result<TransformResult, TransformError> {
         let payload: upstream::OutputItemAddedPayload =
             serde_json::from_value(envelope.extra.clone())
                 .map_err(|e| TransformError::InvalidJson(e.to_string()))?;
 
         let item = match payload.item {
             Some(i) => i,
-            None => return Ok((Vec::new(), false)),
+            None => return Ok(TransformResult::Swallowed),
         };
 
         if item.item_type != "function_call" {
-            return Ok((Vec::new(), false));
+            return Ok(TransformResult::Swallowed);
         }
 
         let fc_id = item.id;
@@ -285,21 +307,21 @@ impl SSETransformer {
             None,
         )?;
         chunks.push(bytes);
-        Ok((chunks.join(&b'\n'), false))
+        Ok(TransformResult::Emitted(chunks.join(&b'\n')))
     }
 
     fn handle_function_call_args_delta(
         &mut self,
         envelope: &EventEnvelope,
         seq: Option<u64>,
-    ) -> Result<(Vec<u8>, bool), TransformError> {
+    ) -> Result<TransformResult, TransformError> {
         let payload: upstream::FunctionCallArgsDeltaPayload =
             serde_json::from_value(envelope.extra.clone())
                 .map_err(|e| TransformError::InvalidJson(e.to_string()))?;
 
         let idx = match self.tool_index_by_item_id.get(&payload.item_id) {
             Some(&i) => i,
-            None => return Ok((Vec::new(), false)),
+            None => return Ok(TransformResult::Swallowed),
         };
 
         let mut chunks = Vec::new();
@@ -325,6 +347,6 @@ impl SSETransformer {
             None,
         )?;
         chunks.push(bytes);
-        Ok((chunks.join(&b'\n'), false))
+        Ok(TransformResult::Emitted(chunks.join(&b'\n')))
     }
 }
