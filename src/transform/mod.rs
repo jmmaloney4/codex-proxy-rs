@@ -20,15 +20,15 @@ pub enum TransformError {
 /// Distinguishes three semantically different states that the Go implementation
 /// conflated into a single `(bytes, bool)` pair:
 ///
-/// - `Emitted`: bytes to send downstream
+/// - `Emitted`: one or more frames to send downstream (each a `Vec<u8>`)
 /// - `Swallowed`: event was handled but produced no output (relay may keepalive)
 /// - `Done`: stream is complete, relay must emit `[DONE]` sentinel
 ///
 /// See ADR 002 for rationale.
 #[derive(Debug)]
 pub enum TransformResult {
-    /// Bytes to emit downstream (one or more `data:` frames, newline-separated).
-    Emitted(Vec<u8>),
+    /// Per-frame bytes to emit downstream. Each `Vec<u8>` is a complete JSON line.
+    Emitted(Vec<Vec<u8>>),
     /// Upstream event was handled but produced no downstream output.
     /// The relay should consider emitting an SSE keepalive comment if
     /// the idle interval has elapsed.
@@ -70,6 +70,17 @@ impl SSETransformer {
             next_tool_index: 0,
             saw_tool_calls: false,
         }
+    }
+
+    /// Reset per-response state. Called when a new `response.created` arrives
+    /// to prevent state leaks when reusing the transformer across responses.
+    fn reset_response_state(&mut self) {
+        self.role_sent = false;
+        self.tool_index_by_item_id.clear();
+        self.tool_id_by_item_id.clear();
+        self.tool_name_by_item_id.clear();
+        self.next_tool_index = 0;
+        self.saw_tool_calls = false;
     }
 
     fn send_role(&mut self, seq: Option<u64>) -> Result<Option<Vec<u8>>, TransformError> {
@@ -151,9 +162,18 @@ impl SSETransformer {
         &mut self,
         envelope: &EventEnvelope,
     ) -> Result<TransformResult, TransformError> {
-        let payload: upstream::CreatedPayload = serde_json::from_value(envelope.extra.clone())
-            .map_err(|e| TransformError::InvalidJson(e.to_string()))?;
+        let payload: upstream::CreatedPayload = match serde_json::from_value(envelope.extra.clone())
+        {
+            Ok(p) => p,
+            Err(_) => return Ok(TransformResult::Swallowed),
+        };
+
+        if payload.response.id.is_empty() {
+            return Ok(TransformResult::Swallowed);
+        }
+
         self.response_id = format!("chatcmpl-{}", payload.response.id);
+        self.reset_response_state();
         Ok(TransformResult::Swallowed)
     }
 
@@ -166,9 +186,9 @@ impl SSETransformer {
             serde_json::from_value(envelope.extra.clone())
                 .map_err(|e| TransformError::InvalidJson(e.to_string()))?;
 
-        let mut chunks = Vec::new();
+        let mut frames = Vec::new();
         if let Some(role) = self.send_role(seq)? {
-            chunks.push(role);
+            frames.push(role);
         }
 
         let bytes = self.make_chunk(
@@ -180,8 +200,8 @@ impl SSETransformer {
             None,
             None,
         )?;
-        chunks.push(bytes);
-        Ok(TransformResult::Emitted(chunks.join(&b'\n')))
+        frames.push(bytes);
+        Ok(TransformResult::Emitted(frames))
     }
 
     fn handle_completed(
@@ -198,13 +218,17 @@ impl SSETransformer {
             "stop"
         };
 
-        let usage = payload.response.usage.as_ref().map(|u| {
-            let (pt, ct) = u.to_openai();
-            Usage::new(pt, ct)
-        });
+        // Always emit usage: prefer upstream values, fall back to zeroed.
+        let usage = match payload.response.usage.as_ref() {
+            Some(u) => {
+                let (pt, ct, tt) = u.to_openai();
+                Usage::with_total(pt, ct, tt)
+            }
+            None => Usage::new(0, 0),
+        };
 
-        let bytes = self.make_chunk(seq, ChunkDelta::default(), Some(finish), usage)?;
-        Ok(TransformResult::Emitted(bytes))
+        let bytes = self.make_chunk(seq, ChunkDelta::default(), Some(finish), Some(usage))?;
+        Ok(TransformResult::Emitted(vec![bytes]))
     }
 
     fn handle_reasoning(
@@ -225,9 +249,9 @@ impl SSETransformer {
             None => return Ok(TransformResult::Swallowed),
         };
 
-        let mut chunks = Vec::new();
+        let mut frames = Vec::new();
         if let Some(role) = self.send_role(seq)? {
-            chunks.push(role);
+            frames.push(role);
         }
 
         let bytes = self.make_chunk(
@@ -239,8 +263,8 @@ impl SSETransformer {
             None,
             None,
         )?;
-        chunks.push(bytes);
-        Ok(TransformResult::Emitted(chunks.join(&b'\n')))
+        frames.push(bytes);
+        Ok(TransformResult::Emitted(frames))
     }
 
     fn handle_output_item_added(
@@ -258,6 +282,11 @@ impl SSETransformer {
         };
 
         if item.item_type != "function_call" {
+            return Ok(TransformResult::Swallowed);
+        }
+
+        // Guard: refuse to record entries under empty keys.
+        if item.id.is_empty() || item.name.is_empty() {
             return Ok(TransformResult::Swallowed);
         }
 
@@ -284,9 +313,9 @@ impl SSETransformer {
         self.tool_name_by_item_id.insert(fc_id, name.clone());
         self.saw_tool_calls = true;
 
-        let mut chunks = Vec::new();
+        let mut frames = Vec::new();
         if let Some(role) = self.send_role(seq)? {
-            chunks.push(role);
+            frames.push(role);
         }
 
         let bytes = self.make_chunk(
@@ -306,8 +335,8 @@ impl SSETransformer {
             None,
             None,
         )?;
-        chunks.push(bytes);
-        Ok(TransformResult::Emitted(chunks.join(&b'\n')))
+        frames.push(bytes);
+        Ok(TransformResult::Emitted(frames))
     }
 
     fn handle_function_call_args_delta(
@@ -324,9 +353,9 @@ impl SSETransformer {
             None => return Ok(TransformResult::Swallowed),
         };
 
-        let mut chunks = Vec::new();
+        let mut frames = Vec::new();
         if let Some(role) = self.send_role(seq)? {
-            chunks.push(role);
+            frames.push(role);
         }
 
         let bytes = self.make_chunk(
@@ -346,7 +375,7 @@ impl SSETransformer {
             None,
             None,
         )?;
-        chunks.push(bytes);
-        Ok(TransformResult::Emitted(chunks.join(&b'\n')))
+        frames.push(bytes);
+        Ok(TransformResult::Emitted(frames))
     }
 }

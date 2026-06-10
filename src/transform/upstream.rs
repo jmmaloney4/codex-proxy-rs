@@ -19,11 +19,13 @@ pub struct EventEnvelope {
 /// Typed payload for `response.created`.
 #[derive(Debug, Deserialize)]
 pub struct CreatedPayload {
+    #[serde(default)]
     pub response: CreatedResponse,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct CreatedResponse {
+    #[serde(default)]
     pub id: String,
 }
 
@@ -57,16 +59,21 @@ pub struct UpstreamUsage {
     #[serde(default)]
     pub completion_tokens: Option<i64>,
     #[serde(default)]
+    pub total_tokens: Option<i64>,
+    #[serde(default)]
     pub input_tokens: Option<i64>,
     #[serde(default)]
     pub output_tokens: Option<i64>,
 }
 
 impl UpstreamUsage {
-    pub fn to_openai(&self) -> (i64, i64) {
+    /// Returns `(prompt_tokens, completion_tokens, total_tokens)`.
+    /// Prefers explicit upstream values; falls back to computed defaults.
+    pub fn to_openai(&self) -> (i64, i64, Option<i64>) {
         let pt = self.prompt_tokens.or(self.input_tokens).unwrap_or(0);
         let ct = self.completion_tokens.or(self.output_tokens).unwrap_or(0);
-        (pt, ct)
+        let tt = self.total_tokens;
+        (pt, ct, tt)
     }
 }
 

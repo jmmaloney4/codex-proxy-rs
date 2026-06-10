@@ -3,20 +3,21 @@ use pretty_assertions::assert_eq;
 use rstest::rstest;
 use serde_json::{Value, json};
 
+/// Helper: flatten the per-frame bytes from an Emitted result into a single byte slice.
+/// Panics if the result is not Emitted.
+fn emitted_bytes(result: TransformResult) -> Vec<u8> {
+    match result {
+        TransformResult::Emitted(frames) => frames.join(&b'\n'),
+        other => panic!("expected Emitted, got {other:?}"),
+    }
+}
+
 fn parse_json_lines(bytes: &[u8]) -> Vec<Value> {
     std::str::from_utf8(bytes)
         .expect("valid utf8")
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).expect("valid json line"))
         .collect()
-}
-
-/// Helper: extract emitted bytes or panic with a context message.
-fn emitted_bytes(result: TransformResult) -> Vec<u8> {
-    match result {
-        TransformResult::Emitted(bytes) => bytes,
-        other => panic!("expected Emitted, got {other:?}"),
-    }
 }
 
 // --- response.created ---
@@ -30,6 +31,43 @@ fn handles_response_created_and_stores_response_id() {
 
     assert!(matches!(result, TransformResult::Swallowed));
     assert_eq!(transformer.response_id, "chatcmpl-resp_123");
+}
+
+// --- response.created with missing id ---
+
+#[rstest]
+fn handles_created_without_response_id_gracefully() {
+    let input = br#"{"type":"response.created","sequence_number":0,"response":{}}"#;
+    let mut transformer = SSETransformer::new("gpt-5");
+    transformer.response_id = "chatcmpl-old".to_string();
+
+    let result = transformer.transform(input).expect("transform succeeds");
+    assert!(matches!(result, TransformResult::Swallowed));
+    // response_id should remain unchanged — not overwritten with empty
+    assert_eq!(transformer.response_id, "chatcmpl-old");
+}
+
+// --- response.created resets state ---
+
+#[rstest]
+fn handles_created_resets_per_response_state() {
+    let mut transformer = SSETransformer::new("");
+    transformer.response_id = "chatcmpl-old".to_string();
+    transformer.role_sent = true;
+    transformer.saw_tool_calls = true;
+    transformer
+        .tool_index_by_item_id
+        .insert("fc_old".to_string(), 5);
+    transformer.next_tool_index = 5;
+
+    let input = br#"{"type":"response.created","sequence_number":0,"response":{"id":"resp_new"}}"#;
+    let result = transformer.transform(input).expect("transform succeeds");
+    assert!(matches!(result, TransformResult::Swallowed));
+    assert_eq!(transformer.response_id, "chatcmpl-resp_new");
+    assert!(!transformer.role_sent);
+    assert!(!transformer.saw_tool_calls);
+    assert!(transformer.tool_index_by_item_id.is_empty());
+    assert_eq!(transformer.next_tool_index, 0);
 }
 
 // --- output_text.delta (first) ---
@@ -147,7 +185,22 @@ fn transforms_completed_event_into_final_chunk_with_usage() {
     );
 }
 
-// --- completed without usage ---
+// --- completed with upstream total_tokens ---
+
+#[rstest]
+fn completed_prefers_upstream_total_tokens() {
+    let mut transformer = SSETransformer::new("");
+    transformer.response_id = "chatcmpl-resp_123".to_string();
+
+    let input = br#"{"type":"response.completed","sequence_number":92,"response":{"usage":{"input_tokens":11,"output_tokens":7,"total_tokens":100}}}"#;
+
+    let result = transformer.transform(input).expect("transform succeeds");
+    let out = emitted_bytes(result);
+    let chunk: Value = serde_json::from_slice(&out).expect("valid json");
+    assert_eq!(chunk["usage"]["total_tokens"], json!(100));
+}
+
+// --- completed without usage (now emits zeroed usage) ---
 
 #[rstest]
 fn handles_completed_without_usage() {
@@ -161,7 +214,15 @@ fn handles_completed_without_usage() {
     let out = emitted_bytes(result);
     let chunk: Value = serde_json::from_slice(&out).expect("valid json");
     assert_eq!(chunk["choices"][0]["finish_reason"], json!("stop"));
-    assert!(chunk.get("usage").is_none());
+    // Must emit a zeroed usage object, not omit it
+    assert_eq!(
+        chunk["usage"],
+        json!({
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0
+        })
+    );
 }
 
 // --- tool-call output_item.added ---
@@ -190,6 +251,20 @@ fn handles_output_item_added_for_function_call() {
     assert!(transformer.saw_tool_calls);
     assert_eq!(transformer.tool_index_by_item_id["fc_1"], 0);
     assert_eq!(transformer.tool_id_by_item_id["fc_1"], "call_abc");
+}
+
+// --- tool-call output_item.added with empty id/name is swallowed ---
+
+#[rstest]
+fn swallows_output_item_added_with_empty_id_or_name() {
+    let mut transformer = SSETransformer::new("");
+    transformer.response_id = "chatcmpl-resp_456".to_string();
+
+    let input = br#"{"type":"response.output_item.added","sequence_number":30,"item":{"id":"","call_id":"","type":"function_call","name":""}}"#;
+
+    let result = transformer.transform(input).expect("transform succeeds");
+    assert!(matches!(result, TransformResult::Swallowed));
+    assert!(!transformer.saw_tool_calls);
 }
 
 // --- function_call_arguments.delta ---

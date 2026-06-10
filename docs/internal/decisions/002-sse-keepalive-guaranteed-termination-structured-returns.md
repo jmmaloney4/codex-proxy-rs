@@ -1,14 +1,14 @@
 ---
 id: ADR-002
 title: SSE Keepalive, Guaranteed Stream Termination, and Structured Transform Returns
-status: proposed
+status: accepted
 date: 2026-06-10
 ---
 
 # ADR 002: SSE Keepalive, Guaranteed Stream Termination, and Structured Transform Returns
 
 *Date:* 2026-06-10
-*Status:* proposed
+*Status:* accepted
 
 ## Context
 
@@ -147,6 +147,29 @@ maintenance on a codebase being replaced.
    - Active streaming suppresses keepalive
 
 ## Risks
+
+### Amendment: Keepalive trigger is timer-based, not purely Swallowed-triggered
+
+The original decision described keepalive as triggered on `Swallowed` events
+from the transformer. However, when the upstream goes completely silent (e.g.
+a long-running model with no SSE events at all), there are no events to
+transform and thus no `Swallowed` signals. The keepalive mechanism must
+therefore use an **idle deadline on last-write** — a timer that fires
+`N` seconds after the last byte was written downstream, independent of
+upstream event arrival.
+
+In the Phase 2 relay, this is implemented via a `tokio::select!` branch with
+a read-with-deadline on the upstream SSE stream. If no event arrives within
+the keepalive interval after the last write, the relay emits `: ping\n\n`
+and resets the deadline. This handles both cases:
+
+- **Active upstream, no output:** `Swallowed` events keep the relay loop
+  spinning; the idle deadline resets on each keepalive emission.
+- **Silent upstream:** The read-with-deadline fires, emitting a keepalive
+  even with zero upstream events.
+
+This amendment does not change the `TransformResult` API or the transformer's
+responsibilities — it only clarifies the relay-layer implementation strategy.
 
 - **Return-type change is a breaking API change.** Since `transform()` is the
   only public entry point, all callers (currently just tests) must update. This

@@ -65,4 +65,14 @@ impl Usage {
             total_tokens: prompt_tokens + completion_tokens,
         }
     }
+
+    /// Create a Usage with an explicit total_tokens from upstream,
+    /// falling back to computed `prompt_tokens + completion_tokens`.
+    pub fn with_total(prompt_tokens: i64, completion_tokens: i64, total: Option<i64>) -> Self {
+        Self {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: total.unwrap_or(prompt_tokens + completion_tokens),
+        }
+    }
 }

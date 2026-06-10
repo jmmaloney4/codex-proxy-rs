@@ -1,14 +1,14 @@
 ---
 id: ADR-001
 title: Typed SSE Event Models and Loose Edge Payloads
-status: proposed
+status: accepted
 date: 2026-06-10
 ---
 
 # ADR 001: Typed SSE Event Models and Loose Edge Payloads
 
 *Date:* 2026-06-10
-*Status:* proposed
+*Status:* accepted
 
 ## Context
 
