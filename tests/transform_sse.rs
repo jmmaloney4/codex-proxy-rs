@@ -11,6 +11,8 @@ fn parse_json_lines(bytes: &[u8]) -> Vec<Value> {
         .collect()
 }
 
+// --- Existing tests (response.created, text delta, completed) ---
+
 #[rstest]
 fn transforms_first_output_text_delta_into_role_and_content_chunks() {
     let mut transformer = SSETransformer::new("");
@@ -56,4 +58,230 @@ fn transforms_completed_event_into_final_chunk_with_usage() {
             "total_tokens": 18
         })
     );
+}
+
+// --- New: response.created ---
+
+#[rstest]
+fn handles_response_created_and_stores_response_id() {
+    let input = br#"{"type":"response.created","sequence_number":0,"response":{"id":"resp_123"}}"#;
+    let mut transformer = SSETransformer::new("");
+
+    let (out, done) = transformer.transform(input).expect("transform succeeds");
+
+    assert!(!done);
+    assert!(out.is_empty());
+    assert_eq!(transformer.response_id, "chatcmpl-resp_123");
+}
+
+// --- New: subsequent output_text.delta ---
+
+#[rstest]
+fn handles_subsequent_output_text_delta_without_role() {
+    let mut transformer = SSETransformer::new("");
+    transformer.response_id = "chatcmpl-resp_123".to_string();
+    transformer.role_sent = true;
+
+    let input = br#"{"type":"response.output_text.delta","sequence_number":81,"item_id":"msg_123","output_index":1,"content_index":0,"delta":" world"}"#;
+
+    let (out, done) = transformer.transform(input).expect("transform succeeds");
+
+    assert!(!done);
+    let chunk: Value = serde_json::from_slice(&out).expect("valid json");
+    assert_eq!(chunk["object"], json!("chat.completion.chunk"));
+    assert_eq!(chunk["choices"][0]["delta"]["content"], json!(" world"));
+    // No role on subsequent deltas
+    assert!(chunk["choices"][0]["delta"]["role"].is_null());
+}
+
+// --- New: reasoning delta ---
+
+#[rstest]
+fn handles_reasoning_delta_event() {
+    let mut transformer = SSETransformer::new("");
+    transformer.response_id = "chatcmpl-resp_123".to_string();
+
+    let input = br#"{"type":"response.reasoning_summary_text.delta","sequence_number":5,"item_id":"rs_1","summary_index":0,"delta":"Thinking..."}"#;
+
+    let (out, done) = transformer.transform(input).expect("transform succeeds");
+    assert!(!done);
+
+    let lines = parse_json_lines(&out);
+    assert_eq!(lines.len(), 2);
+
+    // First line: role
+    assert_eq!(lines[0]["choices"][0]["delta"]["role"], json!("assistant"));
+
+    // Second line: reasoning_content
+    assert_eq!(
+        lines[1]["choices"][0]["delta"]["reasoning_content"],
+        json!("Thinking...")
+    );
+}
+
+// --- New: [DONE] ---
+
+#[rstest]
+fn handles_done_marker() {
+    let mut transformer = SSETransformer::new("");
+    let input = b"[DONE]";
+
+    let (out, done) = transformer.transform(input).expect("transform succeeds");
+
+    assert!(done);
+    assert!(out.is_empty());
+}
+
+// --- New: ignored events ---
+
+#[rstest]
+fn ignores_unknown_events() {
+    let mut transformer = SSETransformer::new("");
+    let input = br#"{"type":"response.in_progress","sequence_number":1,"response":{}}"#;
+
+    let (out, done) = transformer.transform(input).expect("transform succeeds");
+
+    assert!(!done);
+    assert!(out.is_empty());
+}
+
+// --- New: completed without usage ---
+
+#[rstest]
+fn handles_completed_without_usage() {
+    let mut transformer = SSETransformer::new("");
+    transformer.response_id = "chatcmpl-resp_123".to_string();
+
+    let input = br#"{"type":"response.completed","sequence_number":92,"response":{}}"#;
+
+    let (out, done) = transformer.transform(input).expect("transform succeeds");
+
+    assert!(!done);
+    let chunk: Value = serde_json::from_slice(&out).expect("valid json");
+    assert_eq!(chunk["choices"][0]["finish_reason"], json!("stop"));
+    // No usage key when not provided
+    assert!(chunk.get("usage").is_none());
+}
+
+// --- New: tool-call output_item.added ---
+
+#[rstest]
+fn handles_output_item_added_for_function_call() {
+    let mut transformer = SSETransformer::new("");
+    transformer.response_id = "chatcmpl-resp_456".to_string();
+
+    let input = br#"{"type":"response.output_item.added","sequence_number":30,"item":{"id":"fc_1","call_id":"call_abc","type":"function_call","name":"get_weather"}}"#;
+
+    let (out, done) = transformer.transform(input).expect("transform succeeds");
+    assert!(!done);
+
+    let lines = parse_json_lines(&out);
+    // First line: role, second line: tool_call start
+    assert_eq!(lines.len(), 2);
+
+    // Role chunk
+    assert_eq!(lines[0]["choices"][0]["delta"]["role"], json!("assistant"));
+
+    // Tool-call start chunk
+    let tc = &lines[1]["choices"][0]["delta"]["tool_calls"][0];
+    assert_eq!(tc["index"], json!(0));
+    assert_eq!(tc["id"], json!("call_abc"));
+    assert_eq!(tc["type"], json!("function"));
+    assert_eq!(tc["function"]["name"], json!("get_weather"));
+    assert_eq!(tc["function"]["arguments"], json!(""));
+
+    // Transformer state updated
+    assert!(transformer.saw_tool_calls);
+    assert_eq!(transformer.tool_index_by_item_id["fc_1"], 0);
+    assert_eq!(transformer.tool_id_by_item_id["fc_1"], "call_abc");
+}
+
+// --- New: function_call_arguments.delta ---
+
+#[rstest]
+fn handles_function_call_args_delta() {
+    let mut transformer = SSETransformer::new("");
+    transformer.response_id = "chatcmpl-resp_456".to_string();
+    transformer.role_sent = true;
+    transformer.saw_tool_calls = true;
+    transformer
+        .tool_index_by_item_id
+        .insert("fc_1".to_string(), 0);
+
+    let input = br#"{"type":"response.function_call_arguments.delta","sequence_number":31,"item_id":"fc_1","delta":"{\"city\":"}"#;
+
+    let (out, done) = transformer.transform(input).expect("transform succeeds");
+    assert!(!done);
+
+    let chunk: Value = serde_json::from_slice(&out).expect("valid json");
+    let tc = &chunk["choices"][0]["delta"]["tool_calls"][0];
+    assert_eq!(tc["index"], json!(0));
+    assert_eq!(tc["function"]["arguments"], json!("{\"city\":"));
+}
+
+// --- New: ignored explicit events ---
+
+#[rstest]
+fn ignores_function_call_arguments_done() {
+    let mut transformer = SSETransformer::new("");
+    let input = br#"{"type":"response.function_call_arguments.done","sequence_number":32,"item_id":"fc_1"}"#;
+
+    let (out, done) = transformer.transform(input).expect("transform succeeds");
+    assert!(!done);
+    assert!(out.is_empty());
+}
+
+#[rstest]
+fn ignores_output_item_done() {
+    let mut transformer = SSETransformer::new("");
+    let input = br#"{"type":"response.output_item.done","sequence_number":33,"item":{"id":"fc_1","type":"function_call"}}"#;
+
+    let (out, done) = transformer.transform(input).expect("transform succeeds");
+    assert!(!done);
+    assert!(out.is_empty());
+}
+
+// --- New: reasoning with output_index > 0 is skipped ---
+
+#[rstest]
+fn skips_reasoning_events_with_nonzero_output_index() {
+    let mut transformer = SSETransformer::new("");
+    transformer.response_id = "chatcmpl-resp_123".to_string();
+
+    let input = br#"{"type":"response.reasoning_summary_text.delta","sequence_number":10,"item_id":"rs_2","output_index":1,"summary_index":0,"delta":"More thinking"}"#;
+
+    let (out, done) = transformer.transform(input).expect("transform succeeds");
+    assert!(!done);
+    assert!(out.is_empty());
+}
+
+// --- New: reasoning non-delta is skipped ---
+
+#[rstest]
+fn skips_reasoning_events_that_are_not_deltas() {
+    let mut transformer = SSETransformer::new("");
+    transformer.response_id = "chatcmpl-resp_123".to_string();
+
+    let input = br#"{"type":"response.reasoning_summary_text.done","sequence_number":10,"item_id":"rs_1","output_index":0,"summary_index":0,"delta":"Done thinking"}"#;
+
+    let (out, done) = transformer.transform(input).expect("transform succeeds");
+    assert!(!done);
+    assert!(out.is_empty());
+}
+
+// --- New: completed with tool_calls finish reason ---
+
+#[rstest]
+fn handles_completed_with_tool_calls_finish_reason() {
+    let mut transformer = SSETransformer::new("");
+    transformer.response_id = "chatcmpl-resp_456".to_string();
+    transformer.saw_tool_calls = true;
+
+    let input = br#"{"type":"response.completed","sequence_number":92,"response":{}}"#;
+
+    let (out, done) = transformer.transform(input).expect("transform succeeds");
+    assert!(!done);
+
+    let chunk: Value = serde_json::from_slice(&out).expect("valid json");
+    assert_eq!(chunk["choices"][0]["finish_reason"], json!("tool_calls"));
 }
