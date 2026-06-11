@@ -75,7 +75,24 @@ string `type` is treated as swallowed (probed for chunk pass-through, otherwise
 ignored); invalid JSON, or a typed-payload failure on a recognized event,
 aborts via the error-frame + `[DONE]` path.
 
-### 5. Pass-through relay: keepalive yes, injection no
+### 5. Spec-correct multi-line frame emission (divergence from Go)
+
+Go writes a multi-line event payload after a single `data: ` prefix, embedding
+raw newlines that corrupt SSE framing (the continuation lines parse as unknown
+fields downstream). `write_data_frame` instead prefixes every payload line with
+`data: ` within one event, which clients rejoin with `\n` — an exact
+reconstruction of the upstream event. Transformed frames are serde-encoded
+JSON and never contain newlines, so this only affects pass-through of
+multi-line events.
+
+### 6. Zero keepalive interval disables keepalive
+
+`sleep_until(last_write + Duration::ZERO)` is perpetually ready, which would
+turn the `select!` loop into a ping flood that starves upstream reads. A zero
+`keepalive_interval` therefore parks the keepalive branch on a pending future —
+zero means "disabled", not "continuous".
+
+### 7. Pass-through relay: keepalive yes, injection no
 
 `pass_through_sse_stream` (Go `PassThroughSSEStream`, used by the
 `/v1/responses` path) gains the same idle-deadline keepalive — SSE comments are
@@ -101,7 +118,7 @@ channel depth), and the relay is strictly sequential anyway.
 ### Injecting `[DONE]`/error frames in pass-through
 
 Symmetric with the rewrite relay. Rejected: wrong protocol for Responses-API
-streams (see §5).
+streams (see §7).
 
 ## Risks
 

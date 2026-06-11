@@ -40,7 +40,8 @@ use crate::transform::{SSETransformer, TransformError, TransformResult};
 #[derive(Debug, Clone)]
 pub struct RelayConfig {
     /// Emit a `: ping\n\n` SSE comment when nothing has been written
-    /// downstream for this long. ADR 002 default: 15 seconds.
+    /// downstream for this long. ADR 002 default: 15 seconds. A zero duration
+    /// disables keepalive entirely (rather than busy-looping pings).
     pub keepalive_interval: std::time::Duration,
 }
 
@@ -152,14 +153,24 @@ impl<R: AsyncBufRead + Unpin> SseEventReader<R> {
     }
 }
 
-/// Write one `data: <payload>\n\n` frame and flush.
+/// Write one SSE event carrying `payload` and flush. Each line of the payload
+/// gets its own `data: ` prefix, so a multi-line payload (a pass-through of an
+/// event that arrived as multiple `data:` lines) is reconstructed as one
+/// spec-correct event — clients rejoin the lines with `\n`. Transformed frames
+/// are serde-encoded JSON and never contain newlines, so this is the identity
+/// `data: <payload>\n\n` for them. (Go writes the joined payload after a
+/// single `data: ` prefix, corrupting multi-line events; the relay is the
+/// bug-fix layer, so we don't port that.)
 async fn write_data_frame<W: AsyncWrite + Unpin>(
     downstream: &mut W,
     payload: &[u8],
 ) -> std::io::Result<()> {
-    downstream.write_all(b"data: ").await?;
-    downstream.write_all(payload).await?;
-    downstream.write_all(b"\n\n").await?;
+    for line in payload.split(|byte| *byte == b'\n') {
+        downstream.write_all(b"data: ").await?;
+        downstream.write_all(line).await?;
+        downstream.write_all(b"\n").await?;
+    }
+    downstream.write_all(b"\n").await?;
     downstream.flush().await
 }
 
@@ -175,6 +186,17 @@ async fn terminate_with_error<W: AsyncWrite + Unpin>(downstream: &mut W, message
 
 fn is_openai_chunk(value: &Value) -> bool {
     value.get("object").and_then(Value::as_str) == Some("chat.completion.chunk")
+}
+
+/// Resolve when the keepalive deadline elapses. A zero interval would make
+/// `sleep_until` perpetually ready and turn the relay loop into a ping flood
+/// that starves upstream reads — treat it as "keepalive disabled" instead.
+async fn keepalive_deadline(last_write: Instant, interval: std::time::Duration) {
+    if interval.is_zero() {
+        std::future::pending::<()>().await
+    } else {
+        sleep_until(last_write + interval).await
+    }
 }
 
 /// Rewrite an upstream Codex/Responses SSE stream into OpenAI chat-completion
@@ -222,7 +244,7 @@ where
                     return Err(RelayError::UpstreamRead(e));
                 }
             },
-            _ = sleep_until(last_write + config.keepalive_interval) => {
+            _ = keepalive_deadline(last_write, config.keepalive_interval) => {
                 downstream
                     .write_all(b": ping\n\n")
                     .await
@@ -334,7 +356,7 @@ where
                 Ok(None) => return Ok(()),
                 Err(e) => return Err(RelayError::UpstreamRead(e)),
             },
-            _ = sleep_until(last_write + config.keepalive_interval) => {
+            _ = keepalive_deadline(last_write, config.keepalive_interval) => {
                 downstream
                     .write_all(b": ping\n\n")
                     .await

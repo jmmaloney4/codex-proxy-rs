@@ -286,6 +286,51 @@ async fn pass_through_relays_done_but_does_not_inject_it() {
     assert!(output.ends_with("data: [DONE]\n\n"), "output: {output}");
 }
 
+#[tokio::test]
+async fn pass_through_reconstructs_multiline_events_with_per_line_data_prefix() {
+    // A multi-line event must come back out as multiple `data:` lines in ONE
+    // event (clients rejoin with \n) — not a single `data: ` prefix with a
+    // raw embedded newline, which corrupts SSE framing (Go's behavior).
+    let input = b"data: first\ndata: second\n\n";
+    let (output, result) = run_pass_through(input).await;
+    result.expect("relay succeeds");
+    assert_eq!(output, "data: first\ndata: second\n\n");
+}
+
+#[tokio::test(start_paused = true)]
+async fn zero_keepalive_interval_disables_pings_without_busy_looping() {
+    // A zero interval must not turn the select! loop into a ping flood.
+    let (mut upstream_tx, upstream_rx) = tokio::io::duplex(64 * 1024);
+    let (downstream_tx, mut downstream_rx) = tokio::io::duplex(64 * 1024);
+
+    let relay = tokio::spawn(async move {
+        rewrite_sse_stream(
+            BufReader::new(upstream_rx),
+            downstream_tx,
+            "gpt-5",
+            &RelayConfig {
+                keepalive_interval: Duration::ZERO,
+            },
+        )
+        .await
+    });
+
+    upstream_tx
+        .write_all(b"data: [DONE]\n\n")
+        .await
+        .expect("write done");
+    drop(upstream_tx);
+
+    let mut output = String::new();
+    downstream_rx
+        .read_to_string(&mut output)
+        .await
+        .expect("read output");
+    assert_eq!(output, "data: [DONE]\n\n");
+    assert!(!output.contains(": ping"));
+    relay.await.expect("join").expect("relay succeeds");
+}
+
 #[tokio::test(start_paused = true)]
 async fn pass_through_emits_keepalive_when_upstream_is_silent() {
     let (upstream_tx, upstream_rx) = tokio::io::duplex(64 * 1024);
