@@ -68,9 +68,16 @@ pub async fn refresh_token(
             "token endpoint returned {status}: {body}"
         )));
     }
-    resp.json::<TokenRefreshResponse>()
+    let parsed = resp
+        .json::<TokenRefreshResponse>()
         .await
-        .map_err(|e| CredentialsError::Refresh(format!("invalid token response: {e}")))
+        .map_err(|e| CredentialsError::Refresh(format!("invalid token response: {e}")))?;
+    if parsed.access_token.is_empty() {
+        return Err(CredentialsError::Refresh(
+            "token endpoint returned an empty access_token".to_string(),
+        ));
+    }
+    Ok(parsed)
 }
 
 #[cfg(test)]
