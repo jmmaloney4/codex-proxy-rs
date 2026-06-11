@@ -114,7 +114,11 @@ impl FsAuthFile {
 
         if let Some(parent) = self.path.parent()
             && !parent.as_os_str().is_empty()
+            && !parent.exists()
         {
+            // 0700 only on directories we create (Go MkdirAll parity) — an
+            // existing PVC directory may rely on group bits (fsGroup,
+            // sidecars) that a blanket chmod would strip.
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(CredentialsError::Storage)?;
@@ -144,9 +148,11 @@ impl FsAuthFile {
             .map_err(CredentialsError::Storage)?;
         file.sync_all().await.map_err(CredentialsError::Storage)?;
         drop(file);
-        tokio::fs::rename(&tmp, &self.path)
-            .await
-            .map_err(CredentialsError::Storage)?;
+        if let Err(err) = tokio::fs::rename(&tmp, &self.path).await {
+            // Don't leave live token material behind in the sibling file.
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(CredentialsError::Storage(err));
+        }
         // fsync the parent directory: rename alone doesn't persist the
         // directory entry, and this file holds the only copy of the rotated
         // refresh token.

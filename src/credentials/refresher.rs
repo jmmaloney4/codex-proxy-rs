@@ -47,7 +47,9 @@ impl OAuthFetcher {
                 "token endpoint returned a non-positive expiry: {expires_in_secs}"
             )));
         }
-        Ok(now_ms() + expires_in_secs * 1000)
+        // Saturating: an absurdly large lifetime caps at i64::MAX instead of
+        // overflowing into a bogus negative expiry.
+        Ok(now_ms().saturating_add(expires_in_secs.saturating_mul(1000)))
     }
 
     /// Refresh + persist. Caller must hold the lock.

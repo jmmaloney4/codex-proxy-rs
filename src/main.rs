@@ -22,7 +22,12 @@ async fn main() -> anyhow::Result<()> {
         )),
         CredsStore::Fs => {
             let path = match config.creds_path.clone() {
-                Some(path) => path,
+                Some(path) => {
+                    if !path.is_absolute() {
+                        anyhow::bail!("--creds-path must be an absolute path");
+                    }
+                    path
+                }
                 None => default_creds_path()?,
             };
             tracing::info!(path = %path.display(), "using filesystem credential store");
