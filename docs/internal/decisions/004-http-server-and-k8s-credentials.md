@@ -120,6 +120,12 @@ tracing output: dev → pretty console, else JSON (Go logger parity).
 4. **Spark/WebSocket dropped** (§5). **k8s-only credential modes** (§4).
 5. **Graceful shutdown** on SIGTERM/SIGINT (Go has none) — required for
    clean k8s rollouts.
+6. **`set-cookie` stripped from mirrored upstream headers** (Go forwards all
+   headers verbatim): backend session material must not cross the proxy
+   boundary. **Constant-time admin-key comparison** (Go uses `!=`).
+7. **Startup credential logging redacted to presence booleans**; Go logs the
+   account id and a sanitized token preview per upstream request — that log
+   line was not ported.
 
 ## Risks
 
