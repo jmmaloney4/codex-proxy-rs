@@ -126,16 +126,24 @@ impl FsAuthFile {
         let data = serde_json::to_vec_pretty(auth)?;
         // Unique sibling temp file: a fixed name could race a writer outside
         // this process's mutex (out-of-design for the 1-replica deployment,
-        // but cheap to rule out).
+        // but cheap to rule out). Created 0600 atomically — a write-then-chmod
+        // sequence would expose the tokens for a moment under a permissive
+        // umask.
         let tmp = self
             .path
             .with_extension(format!("json.tmp.{}", uuid::Uuid::new_v4()));
-        tokio::fs::write(&tmp, &data)
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
             .await
             .map_err(CredentialsError::Storage)?;
-        tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+        tokio::io::AsyncWriteExt::write_all(&mut file, &data)
             .await
             .map_err(CredentialsError::Storage)?;
+        file.sync_all().await.map_err(CredentialsError::Storage)?;
+        drop(file);
         tokio::fs::rename(&tmp, &self.path)
             .await
             .map_err(CredentialsError::Storage)

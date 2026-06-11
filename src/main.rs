@@ -67,17 +67,22 @@ async fn main() -> anyhow::Result<()> {
 /// produces a relative path), an environment with neither variable set is an
 /// error — rotated tokens must never land in the working directory.
 fn default_creds_path() -> anyhow::Result<std::path::PathBuf> {
+    // Relative values are ignored per the XDG base-directory spec ("all
+    // paths must be absolute") — they would land auth.json under the
+    // working directory.
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(std::path::PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
+        .filter(|p| !p.as_os_str().is_empty() && p.is_absolute())
         .or_else(|| {
             std::env::var_os("HOME")
                 .map(std::path::PathBuf::from)
-                .filter(|p| !p.as_os_str().is_empty())
+                .filter(|p| !p.as_os_str().is_empty() && p.is_absolute())
                 .map(|home| home.join(".config"))
         })
         .ok_or_else(|| {
-            anyhow::anyhow!("--creds-path is required when neither XDG_CONFIG_HOME nor HOME is set")
+            anyhow::anyhow!(
+                "--creds-path is required when neither XDG_CONFIG_HOME nor HOME is set to an absolute path"
+            )
         })?;
     Ok(base.join("codex-proxy").join("auth.json"))
 }
