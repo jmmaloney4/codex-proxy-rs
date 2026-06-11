@@ -28,13 +28,18 @@ pub fn response_reader(resp: reqwest::Response) -> impl AsyncBufRead + Unpin {
 
 /// Copy upstream headers, dropping hop-by-hop and length headers that hyper
 /// must own for a streamed body (Go's http.ResponseWriter strips these
-/// implicitly; axum does not).
+/// implicitly; axum does not), plus `set-cookie`: backend session cookies
+/// must not cross the proxy boundary to clients (Go forwards them verbatim —
+/// hardening divergence, ADR 004).
 fn sanitized_headers(upstream: &HeaderMap) -> HeaderMap {
     let mut headers = HeaderMap::new();
     for (name, value) in upstream {
         if matches!(
             name,
-            &header::CONTENT_LENGTH | &header::TRANSFER_ENCODING | &header::CONNECTION
+            &header::CONTENT_LENGTH
+                | &header::TRANSFER_ENCODING
+                | &header::CONNECTION
+                | &header::SET_COOKIE
         ) {
             continue;
         }

@@ -429,6 +429,32 @@ async fn responses_error_mirrored() {
     );
 }
 
+#[tokio::test]
+async fn set_cookie_is_not_mirrored_downstream() {
+    // Backend session cookies must not cross the proxy boundary. Exercised
+    // through the error-mirror path; the streaming path shares the same
+    // sanitized_headers.
+    let (status, body) = (429, r#"{"error":"limited"}"#.to_string());
+    let upstream = MockUpstream::start(vec![MockResponse::StatusWithCookie(status, body)]).await;
+    let app = router(test_state(
+        &upstream.url,
+        Arc::new(StaticCredentials::new("tok", "acct")),
+    ));
+
+    let resp = app
+        .oneshot(chat_request(json!({
+            "model": "gpt-5",
+            "messages": [{"role": "user", "content": "hi"}],
+        })))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        resp.headers().get(header::SET_COOKIE).is_none(),
+        "set-cookie must not cross the proxy boundary"
+    );
+}
+
 // ---- upstream header contract ---------------------------------------------------
 
 #[tokio::test]
