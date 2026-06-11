@@ -63,7 +63,14 @@ impl OAuthFetcher {
 
         let refreshed = OAuthCredentials {
             access_token: new_tokens.access_token,
-            refresh_token: new_tokens.refresh_token,
+            // Providers may not rotate the refresh token; an empty value in
+            // the response must not erase the stored one (Go overwrites —
+            // divergence).
+            refresh_token: if new_tokens.refresh_token.is_empty() {
+                current.refresh_token.clone()
+            } else {
+                new_tokens.refresh_token
+            },
             expires_at_ms,
             user_id: current.user_id.clone(),
         };
@@ -167,11 +174,16 @@ impl CredentialsFetcher for OAuthFetcher {
                 });
             }
         };
+        let persist_refresh_token = if new_tokens.refresh_token.is_empty() {
+            creds.refresh_token.as_str()
+        } else {
+            new_tokens.refresh_token.as_str()
+        };
         if let Err(err) = self
             .store
             .update_tokens(
                 &new_tokens.access_token,
-                &new_tokens.refresh_token,
+                persist_refresh_token,
                 expires_at_ms,
             )
             .await
