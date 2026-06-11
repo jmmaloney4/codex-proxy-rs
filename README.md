@@ -14,6 +14,16 @@ ADMIN_API_KEY=<proxy key> ANTHROPIC_API_KEY=<chatgpt token> CLAUDE_USER_ID=<acco
 - `ENV=production` switches logs to JSON; anything else is pretty console output.
 - `nix build` produces the `codex-proxy` binary; `nix develop` gives the dev toolchain.
 
+### Filesystem credential store (Kubernetes)
+
+```sh
+codex-proxy --creds-store fs --creds-path /data/auth.json
+```
+
+- `auth.json` uses the Go proxy's format (`{"tokens": {access_token, refresh_token, account_id, expiresAt}}`) and must live on a **writable volume** (a PVC): the proxy refreshes OAuth tokens in-process (60-min expiry buffer, 401-triggered retry, 10-min background tick) and persists rotated refresh tokens back to the file atomically, so the token chain survives pod restarts.
+- Bootstrap an empty volume by POSTing `{accessToken, refreshToken, expiresAt, userID}` to `/admin/credentials`, or pre-seed the file (mode 0600).
+- `--creds-path` defaults to `$XDG_CONFIG_HOME/codex-proxy/auth.json`.
+
 ### Routes
 
 | Route | Auth | Behavior |

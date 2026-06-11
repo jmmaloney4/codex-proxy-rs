@@ -4,7 +4,7 @@ use std::time::Duration;
 use clap::Parser;
 
 use codex_proxy_rs::config::{Config, CredsStore, init_tracing};
-use codex_proxy_rs::credentials::{CredentialsFetcher, EnvCredentials};
+use codex_proxy_rs::credentials::{CredentialsFetcher, EnvCredentials, FsAuthFile, OAuthFetcher};
 use codex_proxy_rs::relay::RelayConfig;
 use codex_proxy_rs::server::{AppState, router};
 use codex_proxy_rs::upstream::{UPSTREAM_URL, build_upstream_client};
@@ -20,6 +20,13 @@ async fn main() -> anyhow::Result<()> {
             config.anthropic_api_key.clone(),
             config.claude_user_id.clone(),
         )),
+        CredsStore::Fs => {
+            let path = config.creds_path.clone().unwrap_or_else(default_creds_path);
+            tracing::info!(path = %path.display(), "using filesystem credential store");
+            let fetcher = Arc::new(OAuthFetcher::new(FsAuthFile::new(path), http.clone()));
+            fetcher.spawn_background_refresh();
+            fetcher
+        }
     };
 
     // Startup validation, warn-only like Go.
@@ -50,6 +57,19 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+/// Go `DefaultCredsPath`: $XDG_CONFIG_HOME/codex-proxy/auth.json, with the
+/// ~/.config fallback.
+fn default_creds_path() -> std::path::PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME").unwrap_or_default();
+            std::path::PathBuf::from(home).join(".config")
+        });
+    base.join("codex-proxy").join("auth.json")
 }
 
 /// SIGINT or SIGTERM (the k8s stop signal).
