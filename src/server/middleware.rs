@@ -75,9 +75,16 @@ pub async fn admin_auth(
         return Err(ApiError::Unauthorized("Unauthorized"));
     };
 
-    // Plain comparison, matching Go (`!=`). Constant-time comparison is a
-    // possible hardening follow-up; the key never travels off-cluster.
-    if provided != admin_key {
+    // Constant-time comparison (hardening over Go's `!=`): the timing of an
+    // auth-boundary compare shouldn't reveal how many leading bytes matched.
+    let matches = provided.len() == admin_key.len()
+        && provided
+            .as_bytes()
+            .iter()
+            .zip(admin_key.as_bytes())
+            .fold(0u8, |acc, (lhs, rhs)| acc | (lhs ^ rhs))
+            == 0;
+    if !matches {
         tracing::warn!(uri = %request.uri(), "invalid admin API key provided");
         return Err(ApiError::Unauthorized("Unauthorized"));
     }

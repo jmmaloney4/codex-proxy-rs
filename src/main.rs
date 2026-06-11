@@ -59,15 +59,20 @@ async fn shutdown_signal() {
             .await
             .expect("install ctrl-c handler");
     };
-    let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("install SIGTERM handler")
-            .recv()
-            .await;
-    };
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
+    #[cfg(unix)]
+    {
+        let terminate = async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("install SIGTERM handler")
+                .recv()
+                .await;
+        };
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = terminate => {},
+        }
     }
+    #[cfg(not(unix))]
+    ctrl_c.await;
     tracing::info!("shutdown signal received");
 }
