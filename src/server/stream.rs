@@ -127,7 +127,28 @@ async fn mirror_response(resp: reqwest::Response, warn: bool) -> Response {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let body = resp.bytes().await.unwrap_or_default();
+    let body = match resp.bytes().await {
+        Ok(body) => body,
+        Err(err) => {
+            // Upstream broke mid-body: fail closed with a gateway error
+            // rather than mirroring a misleading empty body under the
+            // original status. (Go mirrors the empty body — divergence.)
+            tracing::error!(
+                error = %err,
+                upstream_status = status.as_u16(),
+                "failed to read upstream response body",
+            );
+            let mut response = Response::new(Body::from(
+                serde_json::json!({"error": "Failed to read upstream response body"}).to_string(),
+            ));
+            *response.status_mut() = StatusCode::BAD_GATEWAY;
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                "application/json".parse().expect("static"),
+            );
+            return response;
+        }
+    };
 
     if warn {
         let preview: String = String::from_utf8_lossy(&body).chars().take(1200).collect();
