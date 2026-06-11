@@ -12,6 +12,14 @@
 //! mirroring Go's `map[string]interface{}`). `serde_json::Map` is sorted by key,
 //! matching Go's `encoding/json` map marshalling, so serialized bodies stay
 //! byte-comparable.
+//!
+//! ## Known byte-parity divergences
+//!
+//! Go's `encoding/json` HTML-escapes `<`, `>`, `&` in string values as
+//! `\u003c`, `\u003e`, `\u0026`. `serde_json` does not. This is a cosmetic
+//! difference — both are valid JSON per RFC 8259 — but means serialized output
+//! is not byte-identical to Go for strings containing these characters. Downstream
+//! consumers parse both forms identically.
 
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -121,7 +129,7 @@ fn build_reasoning_settings(request: &Value) -> Value {
 /// Port of Go `derivePromptCacheKey` + `formatUUID`: SHA-256 of
 /// `model\ninstructions\nfirstUserText` (each trimmed) rendered as a
 /// version-5/RFC-4122 UUID. Empty string when all three inputs are empty.
-fn derive_prompt_cache_key(model: &str, instructions: &str, first_user_text: &str) -> String {
+pub fn derive_prompt_cache_key(model: &str, instructions: &str, first_user_text: &str) -> String {
     let model = model.trim();
     let instructions = instructions.trim();
     let first_user_text = first_user_text.trim();
@@ -512,12 +520,15 @@ pub fn transform_responses_request_body(
     obj.remove("instructions");
 
     // Split `system`-role messages out of `input` into `system_text`.
+    // Track whether the body had a usable `"input"` array so we can
+    // distinguish Go's nil slice (→ JSON null) from an empty array.
     let mut system_text = String::new();
-    let mut all_instructions: Vec<Value> = Vec::new();
+    let mut all_instructions: Option<Vec<Value>> = None;
     if let Some(existing_input) = obj.get("input").and_then(Value::as_array) {
+        let mut instructions: Vec<Value> = Vec::new();
         for msg in existing_input {
             let Some(mm) = msg.as_object() else {
-                all_instructions.push(msg.clone());
+                instructions.push(msg.clone());
                 continue;
             };
             if mm.get("role").and_then(Value::as_str) == Some("system") {
@@ -534,9 +545,10 @@ pub fn transform_responses_request_body(
                 }
                 system_text = parts.join("\n\n");
             } else {
-                all_instructions.push(msg.clone());
+                instructions.push(msg.clone());
             }
         }
+        all_instructions = Some(instructions);
     }
 
     // Re-apply instructions per Go's precedence; system text may become a
@@ -544,7 +556,9 @@ pub fn transform_responses_request_body(
     if !user_instr.is_empty() && !system_text.is_empty() {
         obj.insert("instructions".to_string(), json!(user_instr));
         let developer_msg = json!({ "role": "developer", "content": replace_names(&system_text) });
-        all_instructions.insert(0, developer_msg);
+        if let Some(ref mut instr) = all_instructions {
+            instr.insert(0, developer_msg);
+        }
     } else if !user_instr.is_empty() {
         obj.insert("instructions".to_string(), json!(user_instr));
     } else if !system_text.is_empty() {
@@ -556,7 +570,14 @@ pub fn transform_responses_request_body(
         obj.insert("instructions".to_string(), json!(""));
     }
 
-    obj.insert("input".to_string(), Value::Array(all_instructions));
+    // When the body had no "input" key, match Go's nil-slice → JSON null.
+    // When it did exist, always emit the array (possibly empty after system
+    // message extraction).
+    let input_value = match all_instructions {
+        Some(vec) => Value::Array(vec),
+        None => Value::Null,
+    };
+    obj.insert("input".to_string(), input_value);
     sanitize_responses_input(obj);
 
     obj.insert(

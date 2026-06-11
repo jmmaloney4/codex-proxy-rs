@@ -348,3 +348,101 @@ fn handles_completed_with_tool_calls_finish_reason() {
     let chunk: Value = serde_json::from_slice(&out).expect("valid json");
     assert_eq!(chunk["choices"][0]["finish_reason"], json!("tool_calls"));
 }
+
+// --- new tests (21–25) ---
+
+#[rstest]
+fn state_reset_across_responses() {
+    let mut t = SSETransformer::new("gpt-5");
+    let r1 = json!({"type": "response.created", "response": {"id": "abc"}});
+    t.transform(&serde_json::to_vec(&r1).unwrap()).unwrap();
+    // send text delta
+    let td = json!({"type": "response.output_text.delta", "delta": "hello", "sequence_number": 1});
+    let result = t.transform(&serde_json::to_vec(&td).unwrap()).unwrap();
+    assert!(matches!(result, TransformResult::Emitted(_)));
+    assert!(t.role_sent);
+    // new response.created resets
+    let r2 = json!({"type": "response.created", "response": {"id": "def"}});
+    t.transform(&serde_json::to_vec(&r2).unwrap()).unwrap();
+    assert!(!t.role_sent, "role_sent should be reset");
+    assert!(
+        t.response_id.contains("def"),
+        "response_id should be updated"
+    );
+}
+
+#[rstest]
+fn multiple_tool_calls_indexed() {
+    let mut t = SSETransformer::new("gpt-5");
+    t.response_id = "chatcmpl-test".to_string();
+    // First tool
+    let item1 = json!({
+        "type": "response.output_item.added",
+        "item": {"id": "fc1", "call_id": "call_1", "name": "tool_a", "type": "function_call"},
+    });
+    let r1 = t.transform(&serde_json::to_vec(&item1).unwrap()).unwrap();
+    let out1 = emitted_bytes(r1);
+    let lines1 = parse_json_lines(&out1);
+    // lines[0] = role, lines[1] = tool_call chunk
+    let tc1 = &lines1[1]["choices"][0]["delta"]["tool_calls"][0];
+    assert_eq!(tc1["index"], json!(0));
+
+    // Second tool — role already sent, so only the tool_call chunk
+    let item2 = json!({
+        "type": "response.output_item.added",
+        "item": {"id": "fc2", "call_id": "call_2", "name": "tool_b", "type": "function_call"},
+    });
+    let r2 = t.transform(&serde_json::to_vec(&item2).unwrap()).unwrap();
+    let out2 = emitted_bytes(r2);
+    let lines2 = parse_json_lines(&out2);
+    // No role frame this time (role already sent), so single frame at index 0
+    let tc2 = &lines2[0]["choices"][0]["delta"]["tool_calls"][0];
+    assert_eq!(tc2["index"], json!(1));
+}
+
+#[rstest]
+fn completed_with_tool_calls_finish_reason() {
+    let mut t = SSETransformer::new("gpt-5");
+    t.response_id = "chatcmpl-test".to_string();
+    // Trigger tool call
+    let item = json!({
+        "type": "response.output_item.added",
+        "item": {"id": "fc1", "call_id": "call_1", "name": "tool_a", "type": "function_call"},
+    });
+    t.transform(&serde_json::to_vec(&item).unwrap()).unwrap();
+    // Complete
+    let completed = json!({
+        "type": "response.completed",
+        "response": {"usage": {"input_tokens": 10, "output_tokens": 5}},
+    });
+    let result = t
+        .transform(&serde_json::to_vec(&completed).unwrap())
+        .unwrap();
+    let bytes = match result {
+        TransformResult::Emitted(b) => b,
+        _ => panic!("expected Emitted"),
+    };
+    let chunk: Value = serde_json::from_slice(&bytes[0]).unwrap();
+    assert_eq!(chunk["choices"][0]["finish_reason"], json!("tool_calls"));
+}
+
+#[rstest]
+fn reasoning_summary_extracted() {
+    let mut t = SSETransformer::new("gpt-5");
+    t.response_id = "chatcmpl-test".to_string();
+    let event = json!({
+        "type": "response.reasoning.delta",
+        "summary": [{ "type": "summary_text", "text": "thinking about it" }],
+    });
+    let result = t.transform(&serde_json::to_vec(&event).unwrap()).unwrap();
+    assert!(matches!(result, TransformResult::Emitted(_)));
+}
+
+#[rstest]
+fn empty_input_swallowed() {
+    let mut t = SSETransformer::new("gpt-5");
+    let result = t.transform(b"").unwrap();
+    assert!(matches!(result, TransformResult::Swallowed));
+    let result2 = t.transform(b"   ").unwrap();
+    assert!(matches!(result2, TransformResult::Swallowed));
+}
