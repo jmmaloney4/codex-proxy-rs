@@ -7,7 +7,9 @@ use serde_json::Value;
 
 use super::AppState;
 use super::error::ApiError;
-use super::stream::{RelayMode, mirror_error_response, relay_response};
+use super::stream::{
+    RelayMode, is_event_stream, mirror_error_response, mirror_success_response, relay_response,
+};
 use crate::request::{
     resolve_reasoning_effort, resolve_request_model, transform_responses_request_body,
 };
@@ -41,9 +43,15 @@ pub async fn responses(State(state): State<AppState>, body: Bytes) -> Result<Res
         return Ok(mirror_error_response(resp).await);
     }
 
-    Ok(relay_response(
-        resp,
-        RelayMode::PassThrough,
-        state.relay.clone(),
-    ))
+    // Only SSE responses go through the pass-through relay (Go gates its SSE
+    // headers on the same media-type check). Non-streaming JSON success
+    // responses are mirrored verbatim.
+    if is_event_stream(&resp) {
+        return Ok(relay_response(
+            resp,
+            RelayMode::PassThrough,
+            state.relay.clone(),
+        ));
+    }
+    Ok(mirror_success_response(resp).await)
 }

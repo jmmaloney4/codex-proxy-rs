@@ -29,6 +29,8 @@ pub enum MockResponse {
     Status(u16, String),
     /// Like `Status`, with a `set-cookie` header attached.
     StatusWithCookie(u16, String),
+    /// 200 `application/json` (a non-streaming Responses-API success).
+    Json(String),
     /// 200 `text/event-stream` fed from a channel (for stall/keepalive and
     /// disconnect tests).
     Stream(mpsc::Receiver<Result<Bytes, std::io::Error>>),
@@ -67,6 +69,11 @@ impl MockUpstream {
                         .unwrap(),
                     Some(MockResponse::Status(code, body)) => Response::builder()
                         .status(code)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                    Some(MockResponse::Json(body)) => Response::builder()
+                        .status(200)
                         .header("content-type", "application/json")
                         .body(Body::from(body))
                         .unwrap(),

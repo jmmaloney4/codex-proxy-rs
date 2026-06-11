@@ -401,6 +401,38 @@ async fn responses_passes_through_without_done_injection() {
 }
 
 #[tokio::test]
+async fn responses_non_streaming_json_mirrored_verbatim() {
+    // A non-SSE 200 must come back as the upstream's JSON body, not be
+    // emptied through the SSE relay (Go bug, not ported) or get SSE headers.
+    let payload = r#"{"id":"resp_x","object":"response","output":[]}"#;
+    let upstream = MockUpstream::start(vec![MockResponse::Json(payload.to_string())]).await;
+    let app = router(test_state(
+        &upstream.url,
+        Arc::new(StaticCredentials::new("tok", "acct")),
+    ));
+
+    let resp = app
+        .oneshot(authed(
+            Request::post("/v1/responses")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"model": "gpt-5.1-codex", "input": []}).to_string(),
+                ))
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CONTENT_TYPE).unwrap(),
+        "application/json"
+    );
+    let body = body_string(resp.into_body()).await;
+    assert_eq!(body, payload);
+}
+
+#[tokio::test]
 async fn responses_error_mirrored() {
     let upstream = MockUpstream::start(vec![MockResponse::Status(
         400,

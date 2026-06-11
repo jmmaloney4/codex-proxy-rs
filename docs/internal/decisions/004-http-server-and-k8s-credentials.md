@@ -126,6 +126,13 @@ tracing output: dev → pretty console, else JSON (Go logger parity).
 7. **Startup credential logging redacted to presence booleans**; Go logs the
    account id and a sanitized token preview per upstream request — that log
    line was not ported.
+8. **Non-streaming `/v1/responses` successes are mirrored verbatim.** Go
+   pushes every 2xx through `PassThroughSSEStream`, which silently empties
+   non-SSE JSON bodies; this port branches on the upstream content-type
+   (the same media-type check Go uses for its SSE headers) and mirrors
+   non-SSE bodies through. `content-encoding` is also stripped from
+   mirrored headers (we never advertise accept-encoding; stale encodings
+   would corrupt if decompression were ever enabled transitively).
 
 ## Risks
 

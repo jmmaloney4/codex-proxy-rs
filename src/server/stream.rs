@@ -28,9 +28,11 @@ pub fn response_reader(resp: reqwest::Response) -> impl AsyncBufRead + Unpin {
 
 /// Copy upstream headers, dropping hop-by-hop and length headers that hyper
 /// must own for a streamed body (Go's http.ResponseWriter strips these
-/// implicitly; axum does not), plus `set-cookie`: backend session cookies
-/// must not cross the proxy boundary to clients (Go forwards them verbatim —
-/// hardening divergence, ADR 004).
+/// implicitly; axum does not), plus `set-cookie` (backend session cookies
+/// must not cross the proxy boundary — hardening divergence, ADR 004) and
+/// `content-encoding` (this client never advertises accept-encoding, and if
+/// a transitive feature ever enables reqwest decompression, forwarding the
+/// stale encoding would corrupt the already-decoded body).
 fn sanitized_headers(upstream: &HeaderMap) -> HeaderMap {
     let mut headers = HeaderMap::new();
     for (name, value) in upstream {
@@ -40,12 +42,29 @@ fn sanitized_headers(upstream: &HeaderMap) -> HeaderMap {
                 | &header::TRANSFER_ENCODING
                 | &header::CONNECTION
                 | &header::SET_COOKIE
+                | &header::CONTENT_ENCODING
         ) {
             continue;
         }
         headers.append(name.clone(), value.clone());
     }
     headers
+}
+
+/// Is the upstream response an SSE stream? Go's `writeResponse` makes the
+/// same media-type check (`mime.ParseMediaType` → `text/event-stream`).
+pub fn is_event_stream(resp: &reqwest::Response) -> bool {
+    resp.headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| {
+            ct.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case("text/event-stream")
+        })
+        .unwrap_or(false)
 }
 
 /// Success path of Go `writeResponse`: forced SSE headers, then the relay
@@ -89,6 +108,17 @@ pub fn relay_response(resp: reqwest::Response, mode: RelayMode, relay: RelayConf
 /// Error path of Go `writeResponse` (status != 200): buffer the body, log it,
 /// and mirror status + headers + body downstream.
 pub async fn mirror_error_response(resp: reqwest::Response) -> Response {
+    mirror_response(resp, true).await
+}
+
+/// Mirror a non-SSE success response verbatim — the `/v1/responses`
+/// non-streaming path. (Go pushes these through `PassThroughSSEStream`, which
+/// silently empties any non-SSE body; that bug is not ported — ADR 004.)
+pub async fn mirror_success_response(resp: reqwest::Response) -> Response {
+    mirror_response(resp, false).await
+}
+
+async fn mirror_response(resp: reqwest::Response, warn: bool) -> Response {
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let headers = sanitized_headers(resp.headers());
     let content_type = resp
@@ -99,13 +129,15 @@ pub async fn mirror_error_response(resp: reqwest::Response) -> Response {
         .to_string();
     let body = resp.bytes().await.unwrap_or_default();
 
-    let preview: String = String::from_utf8_lossy(&body).chars().take(1200).collect();
-    tracing::warn!(
-        status_code = status.as_u16(),
-        content_type = %content_type,
-        response_body = %preview,
-        "received error response from upstream API",
-    );
+    if warn {
+        let preview: String = String::from_utf8_lossy(&body).chars().take(1200).collect();
+        tracing::warn!(
+            status_code = status.as_u16(),
+            content_type = %content_type,
+            response_body = %preview,
+            "received error response from upstream API",
+        );
+    }
 
     let mut response = Response::new(Body::from(body));
     *response.status_mut() = status;
