@@ -24,9 +24,11 @@ async fn main() -> anyhow::Result<()> {
 
     // Startup validation, warn-only like Go.
     match creds.get_credentials().await {
+        // Identifiers and token material stay out of the logs (tighter than
+        // Go, which logs the account id and a token preview).
         Ok(c) => tracing::info!(
-            token_length = c.token.len(),
-            account_id = %c.account_id,
+            token_set = !c.token.is_empty(),
+            account_id_set = !c.account_id.is_empty(),
             "credentials loaded",
         ),
         Err(err) => tracing::warn!(error = %err, "could not load credentials at startup"),
