@@ -146,6 +146,18 @@ impl FsAuthFile {
         drop(file);
         tokio::fs::rename(&tmp, &self.path)
             .await
-            .map_err(CredentialsError::Storage)
+            .map_err(CredentialsError::Storage)?;
+        // fsync the parent directory: rename alone doesn't persist the
+        // directory entry, and this file holds the only copy of the rotated
+        // refresh token.
+        if let Some(parent) = self.path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            let dir = tokio::fs::File::open(parent)
+                .await
+                .map_err(CredentialsError::Storage)?;
+            dir.sync_all().await.map_err(CredentialsError::Storage)?;
+        }
+        Ok(())
     }
 }

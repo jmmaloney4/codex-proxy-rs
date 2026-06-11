@@ -38,9 +38,16 @@ impl OAuthFetcher {
         }
     }
 
-    /// Go `CalculateExpiresAt`: now + expires_in seconds, in ms.
-    fn expires_at_from(expires_in_secs: i64) -> i64 {
-        now_ms() + expires_in_secs * 1000
+    /// Go `CalculateExpiresAt`: now + expires_in seconds, in ms. A
+    /// non-positive lifetime is rejected — persisting an already-expired
+    /// token would turn every subsequent request into a refresh attempt.
+    fn expires_at_from(expires_in_secs: i64) -> Result<i64, CredentialsError> {
+        if expires_in_secs <= 0 {
+            return Err(CredentialsError::Refresh(format!(
+                "token endpoint returned a non-positive expiry: {expires_in_secs}"
+            )));
+        }
+        Ok(now_ms() + expires_in_secs * 1000)
     }
 
     /// Refresh + persist. Caller must hold the lock.
@@ -50,7 +57,7 @@ impl OAuthFetcher {
     ) -> Result<OAuthCredentials, CredentialsError> {
         let new_tokens =
             oauth::refresh_token(&self.http, &self.token_url, &current.refresh_token).await?;
-        let expires_at_ms = Self::expires_at_from(new_tokens.expires_in);
+        let expires_at_ms = Self::expires_at_from(new_tokens.expires_in)?;
 
         let refreshed = OAuthCredentials {
             access_token: new_tokens.access_token,
@@ -148,7 +155,16 @@ impl CredentialsFetcher for OAuthFetcher {
                 });
             }
         };
-        let expires_at_ms = Self::expires_at_from(new_tokens.expires_in);
+        let expires_at_ms = match Self::expires_at_from(new_tokens.expires_in) {
+            Ok(ms) => ms,
+            Err(err) => {
+                tracing::error!(error = %err, "rejecting refreshed token, using stale token");
+                return Ok(Credentials {
+                    token: creds.access_token,
+                    account_id: creds.user_id,
+                });
+            }
+        };
         if let Err(err) = self
             .store
             .update_tokens(
