@@ -231,6 +231,21 @@ async fn update_tokens_bootstraps_missing_file() {
 }
 
 #[tokio::test]
+async fn bootstrap_without_user_id_is_rejected() {
+    // A push without userID would persist a file every read rejects.
+    let endpoint = start_token_endpoint(false).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("auth.json");
+    let fetcher = fetcher(FsAuthFile::new(&path), &endpoint.url);
+
+    let result = fetcher
+        .update_tokens("a".to_string(), "r".to_string(), now_ms() + 1, None)
+        .await;
+    assert!(matches!(result, Err(CredentialsError::Unavailable(_))));
+    assert!(!path.exists(), "no unusable file may be created");
+}
+
+#[tokio::test]
 async fn oauth_status_shape_via_trait() {
     let endpoint = start_token_endpoint(false).await;
     let dir = tempfile::tempdir().unwrap();

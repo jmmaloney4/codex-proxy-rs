@@ -112,7 +112,12 @@ async fn update_tokens_preserves_id_token_and_account_id() {
     assert_eq!(raw["tokens"]["refresh_token"], "new-r");
     assert_eq!(raw["tokens"]["expiresAt"], 99);
     // Atomic write leaves no tmp file behind.
-    assert!(!path.with_extension("json.tmp").exists());
+    let residue = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+        .count();
+    assert_eq!(residue, 0, "tmp residue left behind");
 }
 
 #[tokio::test]

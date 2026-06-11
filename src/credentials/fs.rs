@@ -124,7 +124,12 @@ impl FsAuthFile {
         }
 
         let data = serde_json::to_vec_pretty(auth)?;
-        let tmp = self.path.with_extension("json.tmp");
+        // Unique sibling temp file: a fixed name could race a writer outside
+        // this process's mutex (out-of-design for the 1-replica deployment,
+        // but cheap to rule out).
+        let tmp = self
+            .path
+            .with_extension(format!("json.tmp.{}", uuid::Uuid::new_v4()));
         tokio::fs::write(&tmp, &data)
             .await
             .map_err(CredentialsError::Storage)?;

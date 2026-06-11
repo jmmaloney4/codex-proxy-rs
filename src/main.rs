@@ -21,7 +21,10 @@ async fn main() -> anyhow::Result<()> {
             config.claude_user_id.clone(),
         )),
         CredsStore::Fs => {
-            let path = config.creds_path.clone().unwrap_or_else(default_creds_path);
+            let path = match config.creds_path.clone() {
+                Some(path) => path,
+                None => default_creds_path()?,
+            };
             tracing::info!(path = %path.display(), "using filesystem credential store");
             let fetcher = Arc::new(OAuthFetcher::new(FsAuthFile::new(path), http.clone()));
             fetcher.spawn_background_refresh();
@@ -60,16 +63,23 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Go `DefaultCredsPath`: $XDG_CONFIG_HOME/codex-proxy/auth.json, with the
-/// ~/.config fallback.
-fn default_creds_path() -> std::path::PathBuf {
+/// ~/.config fallback. Unlike Go (which ignores a missing HOME and silently
+/// produces a relative path), an environment with neither variable set is an
+/// error — rotated tokens must never land in the working directory.
+fn default_creds_path() -> anyhow::Result<std::path::PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(std::path::PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME").unwrap_or_default();
-            std::path::PathBuf::from(home).join(".config")
-        });
-    base.join("codex-proxy").join("auth.json")
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|home| home.join(".config"))
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!("--creds-path is required when neither XDG_CONFIG_HOME nor HOME is set")
+        })?;
+    Ok(base.join("codex-proxy").join("auth.json"))
 }
 
 /// SIGINT or SIGTERM (the k8s stop signal).

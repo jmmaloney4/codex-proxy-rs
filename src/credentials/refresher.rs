@@ -196,12 +196,20 @@ impl CredentialsFetcher for OAuthFetcher {
                 .update_tokens(&access_token, &refresh_token, expires_at_ms)
                 .await
         } else {
+            // Bootstrapping without an account id would persist a file that
+            // every subsequent read rejects — fail the push instead.
+            let user_id = user_id.filter(|id| !id.is_empty()).ok_or_else(|| {
+                CredentialsError::Unavailable(
+                    "userID is required when bootstrapping the filesystem credential store"
+                        .to_string(),
+                )
+            })?;
             self.store
                 .init(&OAuthCredentials {
                     access_token,
                     refresh_token,
                     expires_at_ms,
-                    user_id: user_id.unwrap_or_default(),
+                    user_id,
                 })
                 .await
         }
