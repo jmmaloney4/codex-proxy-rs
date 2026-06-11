@@ -16,6 +16,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
+tokio = { version = "1", features = ["io-util", "macros", "time"] }
 uuid = { version = "1", features = ["v5"] }
 
 [dev-dependencies]
@@ -23,9 +24,9 @@ pretty_assertions = "1"
 rstest = "0.26"
 # Optional snapshot testing once parity work expands.
 insta = "1"
+tokio = { version = "1", features = ["io-util", "time", "macros", "rt", "test-util"] }
 
 # Deferred full-port deps for later phases only:
-# tokio
 # axum
 # reqwest
 # eventsource-stream
