@@ -2,7 +2,7 @@
 name = "codex-proxy-rs"
 version = "0.1.0"
 edition = "2024"
-description = "Rust scaffold for codex-proxy SSE transformer prototyping"
+description = "Rust port of codex-proxy: OpenAI-compatible reverse proxy for the ChatGPT Codex backend"
 license = "MIT"
 publish = false
 
@@ -10,33 +10,40 @@ publish = false
 name = "codex_proxy_rs"
 path = "src/lib.rs"
 
+[[bin]]
+name = "codex-proxy"
+path = "src/main.rs"
+
 [dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
+futures-util = { version = "0.3", default-features = false }
 regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "http2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
-tokio = { version = "1", features = ["io-util", "macros", "time"] }
-uuid = { version = "1", features = ["v5"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+uuid = { version = "1", features = ["v4", "v5"] }
 
 [dev-dependencies]
+http-body-util = "0.1"
 pretty_assertions = "1"
 rstest = "0.26"
 # Optional snapshot testing once parity work expands.
 insta = "1"
 tokio = { version = "1", features = ["io-util", "time", "macros", "rt", "test-util"] }
+tokio-stream = "0.1"
+tower = { version = "0.5", features = ["util"] }
 
-# Deferred full-port deps for later phases only:
-# axum
-# reqwest
-# eventsource-stream
-# tracing
-# tracing-subscriber
-# tracing-opentelemetry
-# opentelemetry-otlp
-# tokio-tungstenite
-# keyring
-# clap
-# anyhow
-# rand
-# once_cell
+# Deferred deps for later phases only:
+# keyring (not planned — k8s-only credential modes)
+# tokio-tungstenite (not planned — spark/WebSocket upstream dropped)
+# tracing-opentelemetry / opentelemetry-otlp (observability, later)
