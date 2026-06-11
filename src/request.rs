@@ -461,6 +461,8 @@ pub fn build_codex_request_body(request: &Value) -> Value {
     // Tools (always present; JSON null when the request had no tools).
     body.insert("tools".to_string(), map_tools_to_codex(request));
 
+    // Like Go, only the string form of `tool_choice` is honored; the object
+    // form (forcing a named function) falls back to "auto".
     let tool_choice = request
         .get("tool_choice")
         .and_then(Value::as_str)
@@ -519,16 +521,15 @@ pub fn transform_responses_request_body(
     }
     obj.remove("instructions");
 
-    // Split `system`-role messages out of `input` into `system_text`.
-    // Track whether the body had a usable `"input"` array so we can
-    // distinguish Go's nil slice (→ JSON null) from an empty array.
+    // Split `system`-role messages out of `input` into `system_text`. Like Go,
+    // each system message overwrites `system_text` (last one wins) and only
+    // array-shaped `content` is read — string content is dropped.
     let mut system_text = String::new();
-    let mut all_instructions: Option<Vec<Value>> = None;
+    let mut all_instructions: Vec<Value> = Vec::new();
     if let Some(existing_input) = obj.get("input").and_then(Value::as_array) {
-        let mut instructions: Vec<Value> = Vec::new();
         for msg in existing_input {
             let Some(mm) = msg.as_object() else {
-                instructions.push(msg.clone());
+                all_instructions.push(msg.clone());
                 continue;
             };
             if mm.get("role").and_then(Value::as_str) == Some("system") {
@@ -545,10 +546,9 @@ pub fn transform_responses_request_body(
                 }
                 system_text = parts.join("\n\n");
             } else {
-                instructions.push(msg.clone());
+                all_instructions.push(msg.clone());
             }
         }
-        all_instructions = Some(instructions);
     }
 
     // Re-apply instructions per Go's precedence; system text may become a
@@ -556,9 +556,7 @@ pub fn transform_responses_request_body(
     if !user_instr.is_empty() && !system_text.is_empty() {
         obj.insert("instructions".to_string(), json!(user_instr));
         let developer_msg = json!({ "role": "developer", "content": replace_names(&system_text) });
-        if let Some(ref mut instr) = all_instructions {
-            instr.insert(0, developer_msg);
-        }
+        all_instructions.insert(0, developer_msg);
     } else if !user_instr.is_empty() {
         obj.insert("instructions".to_string(), json!(user_instr));
     } else if !system_text.is_empty() {
@@ -570,12 +568,14 @@ pub fn transform_responses_request_body(
         obj.insert("instructions".to_string(), json!(""));
     }
 
-    // When the body had no "input" key, match Go's nil-slice → JSON null.
-    // When it did exist, always emit the array (possibly empty after system
-    // message extraction).
-    let input_value = match all_instructions {
-        Some(vec) => Value::Array(vec),
-        None => Value::Null,
+    // Go's `allInstructions` is a nil slice that only becomes non-nil via
+    // `append`, so an empty result marshals as JSON null — even when the body
+    // *had* an `input` key (e.g. `[]`, or only system messages with no
+    // developer prepend). Verified empirically against the Go package.
+    let input_value = if all_instructions.is_empty() {
+        Value::Null
+    } else {
+        Value::Array(all_instructions)
     };
     obj.insert("input".to_string(), input_value);
     sanitize_responses_input(obj);

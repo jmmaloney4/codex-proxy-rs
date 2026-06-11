@@ -246,12 +246,45 @@ fn responses_input_null_when_input_is_json_null() {
     assert_eq!(body["input"], Value::Null);
 }
 
+// Go's `allInstructions` is a nil slice: an empty `input` array never gets an
+// `append`, so Go marshals `"input": null`. Verified against the Go package.
 #[test]
-fn responses_input_empty_array_preserved() {
+fn responses_input_null_when_empty_array() {
     let mut body = json!({ "instructions": "test", "input": [] });
     let (_m, _e) = transform_responses_request_body(&mut body, "gpt-5", "");
-    assert!(body["input"].is_array());
-    assert_eq!(body["input"].as_array().unwrap().len(), 0);
+    assert_eq!(body["input"], Value::Null);
+}
+
+// All-system input with no user instructions: the system text moves to
+// `instructions` and nothing is ever appended to Go's nil slice → null.
+#[test]
+fn responses_input_null_when_only_system_messages() {
+    let mut body = json!({
+        "input": [
+            { "role": "system", "content": [{ "type": "text", "text": "Sys" }] },
+        ],
+    });
+    let (_m, _e) = transform_responses_request_body(&mut body, "gpt-5", "");
+    assert_eq!(body["instructions"], json!("Sys"));
+    assert_eq!(body["input"], Value::Null);
+}
+
+// All-system input WITH user instructions: the developer-message prepend makes
+// the slice non-empty, so Go emits a one-element array, not null.
+#[test]
+fn responses_input_developer_msg_when_only_system_plus_instructions() {
+    let mut body = json!({
+        "instructions": "test",
+        "input": [
+            { "role": "system", "content": [{ "type": "text", "text": "Sys" }] },
+        ],
+    });
+    let (_m, _e) = transform_responses_request_body(&mut body, "gpt-5", "");
+    assert_eq!(body["instructions"], json!("test"));
+    assert_eq!(
+        body["input"],
+        json!([{ "role": "developer", "content": "Sys" }]),
+    );
 }
 
 #[test]
