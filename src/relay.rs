@@ -75,7 +75,7 @@ pub enum RelayError {
 /// `next_event` is cancel-safe: a partially read line persists in `self.line`
 /// across a dropped call (`read_until` appends into the caller's buffer), so
 /// the keepalive `select!` branch in the relay loops cannot lose data.
-struct SseEventReader<R> {
+pub(crate) struct SseEventReader<R> {
     reader: R,
     line: Vec<u8>,
     data_lines: Vec<Vec<u8>>,
@@ -83,7 +83,7 @@ struct SseEventReader<R> {
 }
 
 impl<R: AsyncBufRead + Unpin> SseEventReader<R> {
-    fn new(reader: R) -> Self {
+    pub(crate) fn new(reader: R) -> Self {
         Self {
             reader,
             line: Vec::new(),
@@ -95,7 +95,7 @@ impl<R: AsyncBufRead + Unpin> SseEventReader<R> {
     /// Yield the next complete SSE event's joined data payload, or `None` at
     /// end of stream. A trailing event without a terminating blank line is
     /// flushed at EOF, matching Go.
-    async fn next_event(&mut self) -> std::io::Result<Option<Vec<u8>>> {
+    pub(crate) async fn next_event(&mut self) -> std::io::Result<Option<Vec<u8>>> {
         loop {
             if self.eof {
                 return Ok(self.take_pending_event());

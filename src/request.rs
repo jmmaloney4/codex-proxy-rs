@@ -50,7 +50,7 @@ pub fn replace_names(input: &str) -> String {
 }
 
 /// Port of Go `resolveRequestModel`: the request `model`, trimmed, or `gpt-5`.
-fn resolve_request_model(request: &Value) -> String {
+pub(crate) fn resolve_request_model(request: &Value) -> String {
     request
         .get("model")
         .and_then(Value::as_str)
@@ -62,7 +62,7 @@ fn resolve_request_model(request: &Value) -> String {
 /// Port of Go `resolveReasoningEffort`. Resolution order: explicit
 /// `reasoning_effort`, then `reasoning.effort`, then a `-<effort>` suffix on the
 /// model name. Empty string when none apply.
-fn resolve_reasoning_effort(request: &Value) -> String {
+pub(crate) fn resolve_reasoning_effort(request: &Value) -> String {
     if let Some(effort) = request.get("reasoning_effort").and_then(Value::as_str) {
         let effort = effort.trim();
         if !effort.is_empty() {

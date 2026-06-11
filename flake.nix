@@ -29,6 +29,10 @@
         "rustfmt"
       ];
       rustAnalyzer = fenix.packages.${system}.rust-analyzer;
+      rustPlatform = pkgs.makeRustPlatform {
+        cargo = toolchain;
+        rustc = toolchain;
+      };
     in {
       devShells.default = pkgs.mkShell {
         packages = [
@@ -39,5 +43,18 @@
 
         RUST_SRC_PATH = "${toolchain}/lib/rustlib/src/rust/library";
       };
+
+      packages.default = rustPlatform.buildRustPackage {
+        pname = "codex-proxy";
+        version = "0.1.0";
+        src = pkgs.lib.cleanSource ./.;
+        cargoLock.lockFile = ./Cargo.lock;
+        # Tests run via cargo-nextest in the devshell; the sandbox build
+        # skips them (network-bound integration tests bind localhost).
+        doCheck = false;
+        meta.mainProgram = "codex-proxy";
+      };
+
+      checks.build = self.packages.${system}.default;
     });
 }
