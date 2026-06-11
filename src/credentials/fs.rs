@@ -116,15 +116,28 @@ impl FsAuthFile {
             && !parent.as_os_str().is_empty()
             && !parent.exists()
         {
-            // 0700 only on directories we create (Go MkdirAll parity) — an
-            // existing PVC directory may rely on group bits (fsGroup,
-            // sidecars) that a blanket chmod would strip.
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(CredentialsError::Storage)?;
-            tokio::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-                .await
-                .map_err(CredentialsError::Storage)?;
+            // 0700 on every directory we create, never on pre-existing ones
+            // (Go `MkdirAll(dir, 0700)` parity) — an existing PVC directory
+            // may rely on group bits (fsGroup, sidecars) that a blanket
+            // chmod would strip, while freshly created ancestors must not
+            // be left world-traversable around a secrets store.
+            let mut missing: Vec<&Path> = Vec::new();
+            let mut cursor = Some(parent);
+            while let Some(dir) = cursor {
+                if dir.as_os_str().is_empty() || dir.exists() {
+                    break;
+                }
+                missing.push(dir);
+                cursor = dir.parent();
+            }
+            for dir in missing.into_iter().rev() {
+                tokio::fs::create_dir(dir)
+                    .await
+                    .map_err(CredentialsError::Storage)?;
+                tokio::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+                    .await
+                    .map_err(CredentialsError::Storage)?;
+            }
         }
 
         let data = serde_json::to_vec_pretty(auth)?;

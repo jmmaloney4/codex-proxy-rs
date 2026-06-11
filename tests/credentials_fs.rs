@@ -42,6 +42,23 @@ async fn init_read_round_trip_with_permissions() {
 }
 
 #[tokio::test]
+async fn deep_created_ancestors_are_all_0700() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a").join("b").join("c").join("auth.json");
+    FsAuthFile::new(&path)
+        .init(&creds("t", "r", 1, "acct"))
+        .await
+        .expect("init succeeds");
+
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let mut cursor = path.parent().unwrap();
+    while cursor != dir.path() {
+        assert_eq!(mode(cursor), 0o700, "dir {} not 0700", cursor.display());
+        cursor = cursor.parent().unwrap();
+    }
+}
+
+#[tokio::test]
 async fn id_token_fallback_when_access_token_empty() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("auth.json");
