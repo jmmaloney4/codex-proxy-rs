@@ -32,8 +32,16 @@ pub struct Config {
     #[arg(long = "creds-store", env = "CODEX_PROXY_CREDS_STORE", value_enum, default_value_t = CredsStore::Env)]
     pub creds_store: CredsStore,
 
-    /// SSE keepalive interval in seconds (0 disables).
-    #[arg(long, env = "CODEX_PROXY_KEEPALIVE_SECS", default_value_t = 15)]
+    /// SSE keepalive interval in seconds. Zero is rejected: the periodic
+    /// ping is also how the relay notices client disconnects while the
+    /// upstream is stalled (the zero-disables semantic exists only at the
+    /// relay-library level, for paused-clock tests).
+    #[arg(
+        long,
+        env = "CODEX_PROXY_KEEPALIVE_SECS",
+        value_parser = clap::value_parser!(u64).range(1..),
+        default_value_t = 15
+    )]
     pub keepalive_secs: u64,
 
     /// Static bearer token for the env credential store (legacy name).
