@@ -196,6 +196,9 @@ impl CredentialsFetcher for OAuthFetcher {
     }
 
     async fn full_credentials(&self) -> Result<OAuthCredentials, CredentialsError> {
+        // Under the same lock as every other store operation, so a status
+        // read can't observe a mid-rotation file.
+        let _guard = self.lock.lock().await;
         self.store.read().await
     }
 

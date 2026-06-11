@@ -143,13 +143,16 @@ impl FsAuthFile {
             .open(&tmp)
             .await
             .map_err(CredentialsError::Storage)?;
-        tokio::io::AsyncWriteExt::write_all(&mut file, &data)
-            .await
-            .map_err(CredentialsError::Storage)?;
-        file.sync_all().await.map_err(CredentialsError::Storage)?;
-        drop(file);
-        if let Err(err) = tokio::fs::rename(&tmp, &self.path).await {
-            // Don't leave live token material behind in the sibling file.
+        // On any failure past creation, remove the sibling file rather than
+        // leave live token material behind.
+        let write_result = async {
+            tokio::io::AsyncWriteExt::write_all(&mut file, &data).await?;
+            file.sync_all().await?;
+            drop(file);
+            tokio::fs::rename(&tmp, &self.path).await
+        }
+        .await;
+        if let Err(err) = write_result {
             let _ = tokio::fs::remove_file(&tmp).await;
             return Err(CredentialsError::Storage(err));
         }
