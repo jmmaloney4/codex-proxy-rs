@@ -4,7 +4,7 @@ use std::time::Duration;
 use clap::Parser;
 
 use codex_proxy_rs::config::{Config, CredsStore, init_tracing};
-use codex_proxy_rs::credentials::{CredentialsFetcher, EnvCredentials};
+use codex_proxy_rs::credentials::{CredentialsFetcher, EnvCredentials, FsAuthFile, OAuthFetcher};
 use codex_proxy_rs::relay::RelayConfig;
 use codex_proxy_rs::server::{AppState, router};
 use codex_proxy_rs::upstream::{UPSTREAM_URL, build_upstream_client};
@@ -20,6 +20,21 @@ async fn main() -> anyhow::Result<()> {
             config.anthropic_api_key.clone(),
             config.claude_user_id.clone(),
         )),
+        CredsStore::Fs => {
+            let path = match config.creds_path.clone() {
+                Some(path) => {
+                    if !path.is_absolute() {
+                        anyhow::bail!("--creds-path must be an absolute path");
+                    }
+                    path
+                }
+                None => default_creds_path()?,
+            };
+            tracing::info!(path = %path.display(), "using filesystem credential store");
+            let fetcher = Arc::new(OAuthFetcher::new(FsAuthFile::new(path), http.clone()));
+            fetcher.spawn_background_refresh();
+            fetcher
+        }
     };
 
     // Startup validation, warn-only like Go.
@@ -50,6 +65,31 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+/// Go `DefaultCredsPath`: $XDG_CONFIG_HOME/codex-proxy/auth.json, with the
+/// ~/.config fallback. Unlike Go (which ignores a missing HOME and silently
+/// produces a relative path), an environment with neither variable set is an
+/// error — rotated tokens must never land in the working directory.
+fn default_creds_path() -> anyhow::Result<std::path::PathBuf> {
+    // Relative values are ignored per the XDG base-directory spec ("all
+    // paths must be absolute") — they would land auth.json under the
+    // working directory.
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty() && p.is_absolute())
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .filter(|p| !p.as_os_str().is_empty() && p.is_absolute())
+                .map(|home| home.join(".config"))
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "--creds-path is required when neither XDG_CONFIG_HOME nor HOME is set to an absolute path"
+            )
+        })?;
+    Ok(base.join("codex-proxy").join("auth.json"))
 }
 
 /// SIGINT or SIGTERM (the k8s stop signal).

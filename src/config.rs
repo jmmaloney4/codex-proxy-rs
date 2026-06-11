@@ -11,6 +11,8 @@ use clap::{Parser, ValueEnum};
 pub enum CredsStore {
     /// Static token from ANTHROPIC_API_KEY / CLAUDE_USER_ID.
     Env,
+    /// auth.json on a writable volume, with in-process OAuth refresh.
+    Fs,
 }
 
 #[derive(Debug, Parser)]
@@ -31,6 +33,11 @@ pub struct Config {
     /// Credential store mode.
     #[arg(long = "creds-store", env = "CODEX_PROXY_CREDS_STORE", value_enum, default_value_t = CredsStore::Env)]
     pub creds_store: CredsStore,
+
+    /// Path to auth.json for the fs credential store.
+    /// Defaults to $XDG_CONFIG_HOME/codex-proxy/auth.json.
+    #[arg(long = "creds-path", env = "CODEX_PROXY_CREDS_PATH")]
+    pub creds_path: Option<std::path::PathBuf>,
 
     /// SSE keepalive interval in seconds. Zero is rejected: the periodic
     /// ping is also how the relay notices client disconnects while the

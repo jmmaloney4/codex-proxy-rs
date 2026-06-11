@@ -12,8 +12,13 @@
 //! no downcasting.
 
 pub mod env;
+pub mod fs;
+pub mod oauth;
+pub mod refresher;
 
 pub use env::EnvCredentials;
+pub use fs::FsAuthFile;
+pub use refresher::OAuthFetcher;
 
 /// What a store can do — drives the `/admin/credentials/status` response
 /// shape (Go switches on the type assertion instead).
