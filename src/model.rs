@@ -17,6 +17,7 @@ pub const GPT5_3_CODEX_SPARK: &str = "gpt-5.3-codex-spark";
 pub const GPT5_5: &str = "gpt-5.5";
 pub const GPT5_CODEX_MINI: &str = "gpt-5-codex-mini";
 pub const GPT5_1_CODEX_MINI: &str = "gpt-5.1-codex-mini";
+pub const GPT5_4_MINI: &str = "gpt-5.4-mini";
 
 const EFFORT_SUFFIXES: &[&str] = &["-xhigh", "-high", "-medium", "-low", "-minimal"];
 
@@ -25,9 +26,8 @@ const EFFORT_SUFFIXES: &[&str] = &["-xhigh", "-high", "-medium", "-low", "-minim
 fn model_allowed_efforts(model: &str) -> Option<&'static [&'static str]> {
     Some(match model {
         GPT5 => &["minimal", "low", "medium", "high"],
-        GPT5_2 | GPT5_4 | GPT5_2_CODEX | GPT5_3_CODEX | GPT5_3_CODEX_SPARK | GPT5_5 => {
-            &["low", "medium", "high", "xhigh"]
-        }
+        GPT5_2 | GPT5_4 | GPT5_4_MINI | GPT5_2_CODEX | GPT5_3_CODEX | GPT5_3_CODEX_SPARK
+        | GPT5_5 => &["low", "medium", "high", "xhigh"],
         GPT5_CODEX => &["minimal", "low", "medium", "high"],
         GPT5_1 | GPT5_1_CODEX => &["low", "medium", "high"],
         GPT5_1_CODEX_MAX => &["low", "medium", "high", "xhigh"],
@@ -39,7 +39,7 @@ fn model_allowed_efforts(model: &str) -> Option<&'static [&'static str]> {
 fn model_default_effort(model: &str) -> Option<&'static str> {
     Some(match model {
         GPT5_1 | GPT5_1_CODEX | GPT5_1_CODEX_MAX => "low",
-        GPT5_2 | GPT5_4 | GPT5_2_CODEX | GPT5_3_CODEX | GPT5_5 | GPT5_CODEX_MINI
+        GPT5_2 | GPT5_4 | GPT5_4_MINI | GPT5_2_CODEX | GPT5_3_CODEX | GPT5_5 | GPT5_CODEX_MINI
         | GPT5_1_CODEX_MINI => "medium",
         GPT5_3_CODEX_SPARK => "high",
         _ => return None,
@@ -79,6 +79,11 @@ pub fn normalize_model(model: &str) -> &'static str {
     }
     if lower.contains("gpt-5.3-codex") {
         return GPT5_3_CODEX;
+    }
+    // Must precede the bare `gpt-5.4` check below: "gpt-5.4-mini" contains the
+    // "gpt-5.4" substring, so without this it would collapse to full gpt-5.4.
+    if lower.contains("gpt-5.4-mini") {
+        return GPT5_4_MINI;
     }
     if lower.contains("gpt-5.4") {
         return GPT5_4;
@@ -264,6 +269,30 @@ mod tests {
     #[test]
     fn normalize_model_gpt54_with_effort_suffix() {
         assert_eq!(normalize_model("gpt-5.4-high"), GPT5_4);
+    }
+
+    #[test]
+    fn normalize_model_gpt54_mini_base() {
+        assert_eq!(normalize_model("gpt-5.4-mini"), GPT5_4_MINI);
+    }
+
+    #[test]
+    fn normalize_model_gpt54_mini_with_effort_suffix() {
+        // The "-high" effort suffix is stripped first, leaving "gpt-5.4-mini",
+        // which must map to the mini and not collapse to full gpt-5.4.
+        assert_eq!(normalize_model("gpt-5.4-mini-high"), GPT5_4_MINI);
+    }
+
+    #[test]
+    fn normalize_model_gpt54_mini_does_not_collapse_to_full() {
+        // Regression guard for the substring-ordering bug: "gpt-5.4-mini"
+        // contains "gpt-5.4", so the mini check must run first.
+        assert_ne!(normalize_model("gpt-5.4-mini"), GPT5_4);
+    }
+
+    #[test]
+    fn clamp_effort_gpt54_mini_defaults_to_medium() {
+        assert_eq!(clamp_reasoning_effort_for_model("", GPT5_4_MINI), "medium");
     }
 
     #[test]
