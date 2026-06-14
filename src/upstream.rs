@@ -9,6 +9,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use opentelemetry_http::HeaderInjector;
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
 use crate::credentials::{CredentialsError, CredentialsFetcher};
 
 /// The one backend endpoint both proxy routes forward to.
@@ -49,6 +52,14 @@ fn bare_token(token: &str) -> &str {
 }
 
 /// One upstream POST with the exact Go header set (`server.go:452-463`).
+///
+/// Runs in its own `upstream.codex` span so the ChatGPT call latency and the
+/// 401-refresh/retry path nest under the request trace (ADR 005 §6).
+#[tracing::instrument(
+    name = "upstream.codex",
+    skip_all,
+    fields(otel.name = "POST codex/responses", http.request.method = "POST")
+)]
 async fn send_codex_request(
     client: &reqwest::Client,
     url: &str,
@@ -61,8 +72,20 @@ async fn send_codex_request(
         r#"{{"turn_id":"{}","sandbox":"none"}}"#,
         uuid::Uuid::new_v4()
     );
+
+    // Inject W3C trace context so this hop is parented on the current span
+    // (ADR 005 §5). reqwest builds headers via a chained `.header()` API with no
+    // mutable map mid-chain, so inject into a carrier and attach it. With no
+    // OTLP layer (or no active span) the context is empty and nothing is added.
+    let mut carrier = http::HeaderMap::new();
+    let cx = tracing::Span::current().context();
+    opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(&cx, &mut HeaderInjector(&mut carrier));
+    });
+
     client
         .post(url)
+        .headers(carrier)
         .header("authorization", format!("Bearer {bare}"))
         .header("version", "0.125.0")
         .header("openai-beta", "responses=experimental")
