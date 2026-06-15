@@ -124,6 +124,28 @@ pub fn init_tracing(env: &str) -> Option<opentelemetry_sdk::trace::SdkTracerProv
 /// otherwise `None`. The endpoint, protocol, and resource attributes are all
 /// read from the standard `OTEL_*` env vars (ADR 005 §10) — garden injects them
 /// the same way it does for LiteLLM.
+/// OTLP export is enabled when either endpoint var holds a non-blank value.
+/// Pure so the gate is tested without mutating process-global env (which races
+/// other threads' `getenv` under the parallel test runner — UB in Rust 2024).
+fn export_enabled(general_endpoint: Option<&str>, traces_endpoint: Option<&str>) -> bool {
+    [general_endpoint, traces_endpoint]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.trim().is_empty())
+}
+
+/// Whether `OTEL_RESOURCE_ATTRIBUTES` already declares a non-blank
+/// `service.name` (a heuristic over the common `k=v,k=v` form — good enough to
+/// decide whether to apply our fallback default, never to parse the full spec).
+fn attrs_declare_service_name(attrs: Option<&str>) -> bool {
+    attrs.is_some_and(|attrs| {
+        attrs
+            .split(',')
+            .filter_map(|kv| kv.split_once('='))
+            .any(|(key, value)| key.trim() == "service.name" && !value.trim().is_empty())
+    })
+}
+
 fn otlp_provider(env: &str) -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
     use opentelemetry::KeyValue;
     use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig};
@@ -137,9 +159,24 @@ fn otlp_provider(env: &str) -> Option<opentelemetry_sdk::trace::SdkTracerProvide
     // precedence). Gating on only the general one would silently disable a
     // valid traces-only configuration. Read directly (not via clap Config)
     // because these vars are consumed by the OTel SDK, never by our own surface.
-    let env_set = |var| std::env::var(var).is_ok_and(|v| !v.trim().is_empty());
-    if !env_set("OTEL_EXPORTER_OTLP_ENDPOINT") && !env_set("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") {
+    let general_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
+    let traces_endpoint = std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT").ok();
+    if !export_enabled(general_endpoint.as_deref(), traces_endpoint.as_deref()) {
         return None;
+    }
+
+    // This build is OTLP/HTTP only (no `grpc-tonic` feature; ADR 005 §10) and
+    // `.with_http()` forces the transport, so `OTEL_EXPORTER_OTLP_PROTOCOL=grpc`
+    // is silently ineffective. Warn rather than let it surprise an operator who
+    // also pointed at a gRPC-only port and then sees every export fail.
+    let requested_protocol = std::env::var("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL")
+        .or_else(|_| std::env::var("OTEL_EXPORTER_OTLP_PROTOCOL"))
+        .unwrap_or_default();
+    if requested_protocol.contains("grpc") {
+        tracing::warn!(
+            requested = %requested_protocol,
+            "OTLP protocol gRPC requested but this build is HTTP-only; using http/protobuf",
+        );
     }
 
     // Deliberately NO `.with_endpoint(endpoint)`: we let the SDK resolve the
@@ -171,13 +208,9 @@ fn otlp_provider(env: &str) -> Option<opentelemetry_sdk::trace::SdkTracerProvide
     // `OTEL_RESOURCE_ATTRIBUTES`. The explicit `.with_service_name()` overrides
     // the EnvResourceDetector, so applying it unconditionally would clobber an
     // operator-provided identity and mislabel spans.
-    let service_name_in_attrs = std::env::var("OTEL_RESOURCE_ATTRIBUTES").is_ok_and(|attrs| {
-        attrs
-            .split(',')
-            .filter_map(|kv| kv.split_once('='))
-            .any(|(k, v)| k.trim() == "service.name" && !v.trim().is_empty())
-    });
-    if std::env::var_os("OTEL_SERVICE_NAME").is_none() && !service_name_in_attrs {
+    let service_name_set = std::env::var_os("OTEL_SERVICE_NAME").is_some()
+        || attrs_declare_service_name(std::env::var("OTEL_RESOURCE_ATTRIBUTES").ok().as_deref());
+    if !service_name_set {
         resource = resource.with_service_name("codex-proxy");
     }
 
@@ -198,72 +231,44 @@ fn otlp_provider(env: &str) -> Option<opentelemetry_sdk::trace::SdkTracerProvide
 
 #[cfg(test)]
 mod tests {
-    use super::otlp_provider;
+    use super::{attrs_declare_service_name, export_enabled};
 
-    /// The gate: OTLP export is built only when one of the standard OTLP
-    /// endpoint env vars is set and non-empty — the general
-    /// `OTEL_EXPORTER_OTLP_ENDPOINT` or the per-signal
-    /// `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. Unset/blank → `None` → logging-only,
-    /// the pre-ADR-005 behavior the whole "feature-dark until configured" claim
-    /// rests on.
+    /// The gate behind "feature-dark until configured": export turns on only
+    /// when one of the standard OTLP endpoint vars holds a non-blank value —
+    /// the general `OTEL_EXPORTER_OTLP_ENDPOINT` or the per-signal
+    /// `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. Tested via the pure decision so no
+    /// process-global env is mutated (that would race other threads under the
+    /// parallel runner).
     #[test]
-    fn otlp_provider_is_gated_on_endpoint_env() {
-        const GENERAL: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
-        const TRACES: &str = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT";
-
-        // Save + restore ambient values so a developer with OTEL configured in
-        // their shell doesn't get a false failure (and vice versa).
-        let saved_general = std::env::var_os(GENERAL);
-        let saved_traces = std::env::var_os(TRACES);
-        // SAFETY: single-threaded access within this serial test; no other test
-        // reads or writes these vars. `set_var`/`remove_var` are unsafe in 2024.
-        let clear = || unsafe {
-            std::env::remove_var(GENERAL);
-            std::env::remove_var(TRACES);
-        };
-        let drain = |provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>| {
-            // Drain the background batch processor deterministically.
-            if let Some(provider) = provider {
-                let _ = provider.shutdown();
-            }
-        };
-
-        clear();
-        assert!(otlp_provider("test").is_none(), "no endpoint → no exporter");
-
-        unsafe { std::env::set_var(GENERAL, "   ") };
+    fn export_gate_requires_a_non_blank_endpoint() {
+        assert!(!export_enabled(None, None), "neither set → off");
+        assert!(!export_enabled(Some("   "), Some("")), "blank values → off");
         assert!(
-            otlp_provider("test").is_none(),
-            "blank endpoint → no exporter"
+            export_enabled(Some("http://collector:4318"), None),
+            "general endpoint → on",
         );
-
-        unsafe { std::env::set_var(GENERAL, "http://127.0.0.1:4318") };
-        let provider = otlp_provider("test");
-        assert!(provider.is_some(), "general endpoint set → exporter built");
-        drain(provider);
-
-        // The per-signal var alone must also enable export (it would otherwise
-        // be a silently-dropped valid config — the bug this gate guards).
-        clear();
-        unsafe { std::env::set_var(TRACES, "http://127.0.0.1:4318/v1/traces") };
-        let provider = otlp_provider("test");
         assert!(
-            provider.is_some(),
-            "traces-specific endpoint set → exporter built"
+            export_enabled(None, Some("http://collector:4318/v1/traces")),
+            "per-signal endpoint → on (would otherwise be a silently-dropped config)",
         );
-        drain(provider);
+    }
 
-        // SAFETY: see above.
-        unsafe {
-            match saved_general {
-                Some(value) => std::env::set_var(GENERAL, value),
-                None => std::env::remove_var(GENERAL),
-            }
-            match saved_traces {
-                Some(value) => std::env::set_var(TRACES, value),
-                None => std::env::remove_var(TRACES),
-            }
-        }
+    /// The fallback `service.name` default must yield to a `service.name=`
+    /// supplied via `OTEL_RESOURCE_ATTRIBUTES`, so it isn't clobbered.
+    #[test]
+    fn service_name_in_resource_attributes_is_detected() {
+        assert!(!attrs_declare_service_name(None));
+        assert!(!attrs_declare_service_name(Some(
+            "deployment.environment=prod,codex.account=main"
+        )));
+        assert!(
+            !attrs_declare_service_name(Some("service.name=")),
+            "blank value does not count",
+        );
+        assert!(attrs_declare_service_name(Some("service.name=my-svc")));
+        assert!(attrs_declare_service_name(Some(
+            "deployment.environment=prod,service.name=my-svc,codex.account=main"
+        )));
     }
 
     /// The propagation seam codex-proxy depends on: a W3C `traceparent` must
