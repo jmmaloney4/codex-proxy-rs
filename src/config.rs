@@ -136,6 +136,11 @@ fn otlp_provider(env: &str) -> Option<opentelemetry_sdk::trace::SdkTracerProvide
         return None;
     }
 
+    // Deliberately NO `.with_endpoint(endpoint)`: we let the SDK resolve the
+    // target from `OTEL_EXPORTER_OTLP_ENDPOINT`, which appends the `/v1/traces`
+    // signal path. Passing the raw value to `.with_endpoint()` would be treated
+    // as the full traces URL and skip that suffix, POSTing to the collector root
+    // (→ 404, dropped spans). See opentelemetry-otlp `resolve_http_endpoint`.
     let exporter = match SpanExporter::builder()
         .with_http()
         .with_protocol(Protocol::HttpBinary)
