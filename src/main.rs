@@ -12,7 +12,9 @@ use codex_proxy_rs::upstream::{UPSTREAM_URL, build_upstream_client};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = Config::parse();
-    init_tracing(&config.env);
+    // `Some` only when OTLP export is configured; held for an explicit flush on
+    // shutdown so the batch processor isn't dropped mid-export (ADR 005 §8).
+    let tracer_provider = init_tracing(&config.env);
 
     let http = build_upstream_client();
     let creds: Arc<dyn CredentialsFetcher> = match config.creds_store {
@@ -61,9 +63,25 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", config.port)).await?;
     tracing::info!(port = config.port, "starting codex-proxy");
-    axum::serve(listener, router(state))
+    let serve_result = axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown_signal())
-        .await?;
+        .await;
+
+    // Drain buffered spans before exit — and before propagating any serve
+    // error, since a failing serve/shutdown is exactly when the last spans
+    // matter most. `global::shutdown_tracer_provider` was removed in the 0.x
+    // line, so flush the held provider directly. Errors here are non-fatal:
+    // the process is already shutting down.
+    if let Some(provider) = tracer_provider {
+        if let Err(err) = provider.force_flush() {
+            tracing::warn!(error = %err, "failed to flush OTLP spans on shutdown");
+        }
+        if let Err(err) = provider.shutdown() {
+            tracing::warn!(error = %err, "failed to shut down tracer provider");
+        }
+    }
+
+    serve_result?;
     Ok(())
 }
 

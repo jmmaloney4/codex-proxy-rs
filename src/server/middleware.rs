@@ -11,6 +11,9 @@
 use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
+use opentelemetry_http::HeaderExtractor;
+use tracing::Instrument as _;
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 use super::AppState;
 use super::error::ApiError;
@@ -26,17 +29,40 @@ pub async fn log_requests(request: Request, next: Next) -> Response {
         .to_string();
     let start = std::time::Instant::now();
 
-    let response = next.run(request).await;
-
-    tracing::info!(
-        method = %method,
-        uri = %uri,
-        user_agent = %user_agent,
-        status = response.status().as_u16(),
-        duration_ms = start.elapsed().as_millis() as u64,
-        "request",
+    // Continue LiteLLM's distributed trace: extract the inbound W3C context and
+    // parent the per-request span on it (ADR 005 §5). With no OTLP layer
+    // installed this is an inert no-op; with no inbound `traceparent` the span
+    // is a fresh root.
+    let parent_cx = opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.extract(&HeaderExtractor(request.headers()))
+    });
+    let span = tracing::info_span!(
+        "http.request",
+        otel.name = %format!("{method} {}", uri.path()),
+        http.request.method = %method,
+        url.path = %uri.path(),
+        http.response.status_code = tracing::field::Empty,
     );
-    response
+    // Errors only when no OTLP layer is installed (export disabled) — benign.
+    let _ = span.set_parent(parent_cx);
+
+    async move {
+        let response = next.run(request).await;
+        let status = response.status().as_u16();
+        tracing::Span::current().record("http.response.status_code", status);
+
+        tracing::info!(
+            method = %method,
+            uri = %uri,
+            user_agent = %user_agent,
+            status = status,
+            duration_ms = start.elapsed().as_millis() as u64,
+            "request",
+        );
+        response
+    }
+    .instrument(span)
+    .await
 }
 
 pub async fn admin_auth(

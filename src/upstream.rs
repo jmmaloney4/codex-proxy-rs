@@ -49,6 +49,14 @@ fn bare_token(token: &str) -> &str {
 }
 
 /// One upstream POST with the exact Go header set (`server.go:452-463`).
+///
+/// Runs in its own `upstream.codex` span so the ChatGPT call latency and the
+/// 401-refresh/retry path nest under the request trace (ADR 005 §6).
+#[tracing::instrument(
+    name = "upstream.codex",
+    skip_all,
+    fields(otel.name = "POST codex/responses", http.request.method = "POST")
+)]
 async fn send_codex_request(
     client: &reqwest::Client,
     url: &str,
@@ -61,6 +69,13 @@ async fn send_codex_request(
         r#"{{"turn_id":"{}","sandbox":"none"}}"#,
         uuid::Uuid::new_v4()
     );
+
+    // We deliberately do NOT inject `traceparent` here. The only upstream is the
+    // external ChatGPT backend, which does not participate in our trace, so the
+    // header would leak internal correlation IDs to a third party with no
+    // benefit — the local `upstream.codex` span already nests correctly via
+    // `tracing`, independent of any wire header (ADR 005 §5). If a traced
+    // *internal* upstream is ever added, inject W3C context there only.
     client
         .post(url)
         .header("authorization", format!("Bearer {bare}"))

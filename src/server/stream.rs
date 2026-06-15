@@ -8,6 +8,7 @@ use axum::response::Response;
 use futures_util::TryStreamExt;
 use tokio::io::{AsyncBufRead, BufReader};
 use tokio_util::io::{ReaderStream, StreamReader};
+use tracing::Instrument as _;
 
 use crate::relay::{RelayConfig, pass_through_sse_stream, rewrite_sse_stream};
 
@@ -87,17 +88,26 @@ pub fn relay_response(resp: reqwest::Response, mode: RelayMode, relay: RelayConf
     // response body would hang forever after the relay finished. Dropping one
     // duplex end closes the other. The unused reverse direction is the cost.
     let (tx, rx) = tokio::io::duplex(64 * 1024);
-    tokio::spawn(async move {
-        let result = match mode {
-            RelayMode::Rewrite { model } => rewrite_sse_stream(upstream, tx, &model, &relay).await,
-            RelayMode::PassThrough => pass_through_sse_stream(upstream, tx, &relay).await,
-        };
-        if let Err(err) = result {
-            // Port of Go server.go:646-654 — but the stream itself was
-            // already terminated correctly by the relay (ADR 002).
-            tracing::error!(error = %err, "SSE relay terminated with error");
+    // The relay runs in a detached task that outlives this function — carry the
+    // current span into it so the streaming duration (codex-proxy's unique trace
+    // contribution) is captured instead of ending when the handler returns
+    // (ADR 005 §7).
+    tokio::spawn(
+        async move {
+            let result = match mode {
+                RelayMode::Rewrite { model } => {
+                    rewrite_sse_stream(upstream, tx, &model, &relay).await
+                }
+                RelayMode::PassThrough => pass_through_sse_stream(upstream, tx, &relay).await,
+            };
+            if let Err(err) = result {
+                // Port of Go server.go:646-654 — but the stream itself was
+                // already terminated correctly by the relay (ADR 002).
+                tracing::error!(error = %err, "SSE relay terminated with error");
+            }
         }
-    });
+        .instrument(tracing::Span::current()),
+    );
 
     let mut response = Response::new(Body::from_stream(ReaderStream::new(rx)));
     *response.status_mut() = status;

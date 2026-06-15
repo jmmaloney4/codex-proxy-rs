@@ -33,7 +33,18 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 uuid = { version = "1", features = ["v4", "v5"] }
 
+# OpenTelemetry OTLP trace export (ADR 005). OTLP/HTTP over reqwest — no gRPC.
+# Caret ranges lock the minor (the compatibility-matrix boundary); Cargo.lock
+# freezes the exact patch set. Keep tracing-opentelemetry one minor ahead of the
+# opentelemetry* crates (0.33 ↔ otel 0.32) — see ADR 005 §2.
+opentelemetry = "0.32"
+opentelemetry_sdk = "0.32"
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "reqwest-client"] }
+opentelemetry-http = "0.32"
+tracing-opentelemetry = "0.33"
+
 [dev-dependencies]
+http = "1"  # HeaderMap in the inbound-propagation extraction test
 http-body-util = "0.1"
 pretty_assertions = "1"
 rstest = "0.26"
@@ -47,4 +58,3 @@ tower = { version = "0.5", features = ["util"] }
 # Deferred deps for later phases only:
 # keyring (not planned — k8s-only credential modes)
 # tokio-tungstenite (not planned — spark/WebSocket upstream dropped)
-# tracing-opentelemetry / opentelemetry-otlp (observability, later)
