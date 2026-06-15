@@ -208,7 +208,10 @@ fn otlp_provider(env: &str) -> Option<opentelemetry_sdk::trace::SdkTracerProvide
     // `OTEL_RESOURCE_ATTRIBUTES`. The explicit `.with_service_name()` overrides
     // the EnvResourceDetector, so applying it unconditionally would clobber an
     // operator-provided identity and mislabel spans.
-    let service_name_set = std::env::var_os("OTEL_SERVICE_NAME").is_some()
+    // Treat a blank `OTEL_SERVICE_NAME` as unset (env templating often produces
+    // empty strings) so the fallback still applies rather than exporting an
+    // empty identity — consistent with the endpoint gate above.
+    let service_name_set = std::env::var("OTEL_SERVICE_NAME").is_ok_and(|v| !v.trim().is_empty())
         || attrs_declare_service_name(std::env::var("OTEL_RESOURCE_ATTRIBUTES").ok().as_deref());
     if !service_name_set {
         resource = resource.with_service_name("codex-proxy");
