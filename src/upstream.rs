@@ -9,9 +9,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use opentelemetry_http::HeaderInjector;
-use tracing_opentelemetry::OpenTelemetrySpanExt as _;
-
 use crate::credentials::{CredentialsError, CredentialsFetcher};
 
 /// The one backend endpoint both proxy routes forward to.
@@ -73,19 +70,14 @@ async fn send_codex_request(
         uuid::Uuid::new_v4()
     );
 
-    // Inject W3C trace context so this hop is parented on the current span
-    // (ADR 005 §5). reqwest builds headers via a chained `.header()` API with no
-    // mutable map mid-chain, so inject into a carrier and attach it. With no
-    // OTLP layer (or no active span) the context is empty and nothing is added.
-    let mut carrier = http::HeaderMap::new();
-    let cx = tracing::Span::current().context();
-    opentelemetry::global::get_text_map_propagator(|propagator| {
-        propagator.inject_context(&cx, &mut HeaderInjector(&mut carrier));
-    });
-
+    // We deliberately do NOT inject `traceparent` here. The only upstream is the
+    // external ChatGPT backend, which does not participate in our trace, so the
+    // header would leak internal correlation IDs to a third party with no
+    // benefit — the local `upstream.codex` span already nests correctly via
+    // `tracing`, independent of any wire header (ADR 005 §5). If a traced
+    // *internal* upstream is ever added, inject W3C context there only.
     client
         .post(url)
-        .headers(carrier)
         .header("authorization", format!("Bearer {bare}"))
         .header("version", "0.125.0")
         .header("openai-beta", "responses=experimental")

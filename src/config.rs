@@ -271,16 +271,17 @@ mod tests {
         )));
     }
 
-    /// The propagation seam codex-proxy depends on: a W3C `traceparent` must
-    /// round-trip through the exact carrier types used in the middleware
-    /// (`HeaderExtractor`) and upstream client (`HeaderInjector`) over an
-    /// `http::HeaderMap`. This is the wiring most likely to break on an http /
-    /// opentelemetry-http version bump, so pin it with a known vector.
+    /// The inbound propagation seam codex-proxy depends on: a W3C `traceparent`
+    /// must extract through the exact carrier type used in the middleware
+    /// (`HeaderExtractor` over an `http::HeaderMap`) into a remote parent with
+    /// the right trace_id. This is the wiring most likely to break on an http /
+    /// opentelemetry-http version bump, so pin it with a known vector. (We do
+    /// not inject outbound — the only upstream is external; see `upstream.rs`.)
     #[test]
-    fn w3c_traceparent_round_trips_through_carriers() {
+    fn w3c_traceparent_extracts_into_remote_parent() {
         use opentelemetry::propagation::TextMapPropagator;
         use opentelemetry::trace::TraceContextExt as _;
-        use opentelemetry_http::{HeaderExtractor, HeaderInjector};
+        use opentelemetry_http::HeaderExtractor;
         use opentelemetry_sdk::propagation::TraceContextPropagator;
 
         let propagator = TraceContextPropagator::new();
@@ -298,19 +299,5 @@ mod tests {
             "extracted trace_id must match the inbound traceparent",
         );
         assert!(extracted.is_remote(), "parent must be flagged remote");
-
-        // Inject — the upstream path (codex-proxy → ChatGPT). Same trace_id
-        // continues, so Tempo nests the hop under the inbound trace.
-        let mut outbound = http::HeaderMap::new();
-        propagator.inject_context(&cx, &mut HeaderInjector(&mut outbound));
-        let injected = outbound
-            .get("traceparent")
-            .expect("traceparent injected")
-            .to_str()
-            .unwrap();
-        assert!(
-            injected.contains(trace_id),
-            "injected traceparent {injected} must carry the same trace_id",
-        );
     }
 }

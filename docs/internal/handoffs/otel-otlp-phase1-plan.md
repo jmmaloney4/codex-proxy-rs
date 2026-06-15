@@ -78,29 +78,19 @@ span:
 Keep the existing `tracing::info!("request", ...)` line — it now lands as an
 event inside the span.
 
-## Step 5 — Outbound injection to upstream
+## Step 5 — Upstream span (no outbound injection)
 
-`src/upstream.rs::send_codex_request` (~`:52`). The request is built by chained
-`.header(...)` calls (no mutable `HeaderMap` is exposed mid-chain), so inject
-into a **temporary `HeaderMap`** and attach it with `.headers(...)` before
-`.body()`:
+`src/upstream.rs::send_codex_request` (~`:52`). Wrap it in an `upstream.codex`
+span (via `#[tracing::instrument(name = "upstream.codex", skip_all, …)]`) so the
+ChatGPT request latency and the 401-refresh/retry path appear under the request
+trace. Both `send_codex_request` and `send_with_retry` are `async fn`, so the
+span nests under the request span automatically.
 
-```rust
-let cx = tracing::Span::current().context();      // OpenTelemetrySpanExt
-let mut carrier = http::HeaderMap::new();
-global::get_text_map_propagator(|p| p.inject_context(&cx, &mut HeaderInjector(&mut carrier)));
-// ...existing .header() chain...
-.headers(carrier)   // adds traceparent
-.body(body)
-.send().await
-```
-
-`http` is available transitively (axum→hyper, `http` 1.x — matches
-`opentelemetry-http` 0.32); add it as a direct dep for clarity. Wrap the
-upstream call in a child span (`info_span!("upstream.codex", ...)`) so the
-ChatGPT request latency and the 401-refresh/retry path (`:114`,`:130`,`:132`)
-appear as events under it. Both `send_codex_request` and `send_with_retry` are
-`async fn`, so `Span::current()` reflects the request span.
+**Do NOT inject `traceparent` outbound.** The only upstream is the external
+ChatGPT backend, which doesn't participate in our trace, so a wire header would
+leak internal correlation IDs to a third party for no benefit — the local span
+hierarchy is built by `tracing`, not by any echoed header (ADR 005 §5). Add
+injection only at a traced *internal* upstream if one is ever introduced.
 
 ## Step 6 — Instrument spawned tasks (do not skip)
 

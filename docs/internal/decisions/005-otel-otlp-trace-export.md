@@ -125,17 +125,21 @@ every span unlabeled" bug in this design.
   parent `Context` by extracting over a `HeaderExtractor` of the request
   headers, then `set_parent` on the server span. *This is the line that nests
   codex-proxy under LiteLLM instead of starting a root trace.*
-- **Outbound (inject):** in `send_codex_request` (`src/upstream.rs`), inject the
-  current context into a `HeaderInjector` over the reqwest headers before
-  `.send()`. The ChatGPT backend ignores it, but the span hierarchy stays
-  correct and a future traced upstream gets it for free.
+- **Outbound: deliberately NOT injected.** The only upstream is the external
+  ChatGPT backend, which does not participate in our trace. Injecting
+  `traceparent` there would leak internal correlation IDs to a third party with
+  no benefit — the local `upstream.codex` span already nests correctly via
+  `tracing`, independent of any wire header. (An earlier draft injected "for a
+  future traced upstream"; that hypothetical doesn't justify a standing leak —
+  add injection at that internal hop if/when it exists.)
 
 ### 6. Span shape
 
 - **Server span** per request: `POST /v1/chat/completions`, attrs
   `http.request.method`, `url.path`, `http.response.status_code`, duration.
-- **Upstream span** around the ChatGPT call; 401-refresh + retry recorded as
-  span events (today's `warn!`/`info!` at `src/upstream.rs:114,130,132`).
+- **Upstream span** (`upstream.codex`) around the ChatGPT call; 401-refresh +
+  retry recorded as span events. Local span only — no `traceparent` on the wire
+  (see §5 outbound).
 - **Metadata only — no message content** on any span by default (see
   Non-goals). `gen_ai.request.model` and `stream` are safe to attach; request
   bodies and completions are not.

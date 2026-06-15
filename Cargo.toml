@@ -21,7 +21,6 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = { version = "0.3", default-features = false }
-http = "1"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "http2"] }
 serde = { version = "1", features = ["derive"] }
@@ -42,6 +41,7 @@ opentelemetry-http = "0.32"
 tracing-opentelemetry = "0.33"
 
 [dev-dependencies]
+http = "1"  # HeaderMap in the inbound-propagation extraction test
 http-body-util = "0.1"
 pretty_assertions = "1"
 rstest = "0.26"
