@@ -153,6 +153,11 @@ fn otlp_provider(env: &str) -> Option<opentelemetry_sdk::trace::SdkTracerProvide
     use opentelemetry_sdk::propagation::TraceContextPropagator;
     use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
 
+    // NOTE: this runs *before* `init_tracing` installs the subscriber, so
+    // `tracing::*` events here would go to a no-op dispatcher and vanish.
+    // Startup misconfiguration diagnostics therefore use `eprintln!` to stderr —
+    // the same sink the fmt layer writes to — so operators actually see them.
+
     // Gate: export is on when either standard OTLP endpoint var is set — the
     // general `OTEL_EXPORTER_OTLP_ENDPOINT` or the per-signal
     // `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (which the SDK honors at higher
@@ -173,9 +178,8 @@ fn otlp_provider(env: &str) -> Option<opentelemetry_sdk::trace::SdkTracerProvide
         .or_else(|_| std::env::var("OTEL_EXPORTER_OTLP_PROTOCOL"))
         .unwrap_or_default();
     if requested_protocol.contains("grpc") {
-        tracing::warn!(
-            requested = %requested_protocol,
-            "OTLP protocol gRPC requested but this build is HTTP-only; using http/protobuf",
+        eprintln!(
+            "codex-proxy: WARN OTLP protocol gRPC requested ({requested_protocol}) but this build is HTTP-only; using http/protobuf"
         );
     }
 
@@ -191,9 +195,12 @@ fn otlp_provider(env: &str) -> Option<opentelemetry_sdk::trace::SdkTracerProvide
     {
         Ok(exporter) => exporter,
         Err(err) => {
-            // Misconfiguration must not take the server down — log and fall
+            // Misconfiguration must not take the server down — warn and fall
             // back to logging-only. (Export is best-effort; ADR 005 Risks.)
-            tracing::error!(error = %err, "failed to build OTLP span exporter; tracing export disabled");
+            // `eprintln!` per the pre-subscriber note above.
+            eprintln!(
+                "codex-proxy: ERROR failed to build OTLP span exporter; tracing export disabled: {err}"
+            );
             return None;
         }
     };
