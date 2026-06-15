@@ -83,12 +83,20 @@ attribute keys used — `http.request.method`, `service.version`,
 `deployment.environment` — are stable OTel spec strings, not worth a dependency
 whose constant module paths churn across minors.)
 
-Versions are **pinned exactly** — these crates break APIs across minor releases.
-The compatibility rule that matters: `tracing-opentelemetry` is versioned one
-minor *ahead* of the `opentelemetry*` crates it targets (0.33 → otel 0.32).
-`default-features = false` + the `["trace", "http-proto", "reqwest-client"]`
-trio fully excludes tonic/gRPC (verified: `grpc-tonic` is the only gRPC gate and
-is not selected) and drops the default `metrics`/`logs`/blocking-client pulls.
+These crates break APIs across **minor** releases, so the minor must stay
+locked. The caret ranges above do exactly that (`^0.32` resolves `<0.33`), and
+the committed `Cargo.lock` — consumed by the nix build via
+`cargoLock.lockFile` — freezes the exact resolved set (`0.32.0` / `0.32.1` /
+`0.33.0`) for reproducibility. A `cargo update` therefore stays within the minor
+and cannot silently desync the matrix; only a deliberate manifest edit crosses a
+minor. (Caret, not `=`-pins: consistent with every other dep in this manifest,
+and `=`-pinning would fight the resolver — `opentelemetry_sdk` already resolves
+to `0.32.1` while its siblings are `0.32.0`.) The compatibility rule that
+matters: `tracing-opentelemetry` is versioned one minor *ahead* of the
+`opentelemetry*` crates it targets (0.33 → otel 0.32). `default-features = false`
++ the `["trace", "http-proto", "reqwest-client"]` trio fully excludes tonic/gRPC
+(verified: `grpc-tonic` is the only gRPC gate and is not selected) and drops the
+default `metrics`/`logs`/blocking-client pulls.
 
 ### 3. Subscriber: layered Registry, logs and traces coexist
 
