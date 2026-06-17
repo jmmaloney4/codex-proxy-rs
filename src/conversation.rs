@@ -7,13 +7,17 @@
 //! and has no side effects.
 //!
 //! Resolution order:
-//! 1. An explicit client key: the `x-conversation-id` header, else the
-//!    top-level `user` body field.
+//! 1. An explicit client key: the `x-conversation-id` header. The OpenAI `user`
+//!    field is deliberately **not** used — it identifies an end *user*, not a
+//!    conversation, so keying on it would merge a user's separate chats under
+//!    one identity (and later, one reasoning history). This refines ADR 006 §2,
+//!    which listed `user` as a candidate.
 //! 2. A model-independent hash of the conversation *head* (system instructions
-//!    + first user message). Model is deliberately excluded so the key survives
-//!    a mid-conversation model switch — which invalidates only the persisted
-//!    reasoning (account × model scoping, ADR 006 §1), not the conversation's
-//!    identity.
+//!    + first user message), with length-prefixed field boundaries so embedded
+//!    newlines cannot make distinct heads collide. Model is deliberately
+//!    excluded so the key survives a mid-conversation model switch — which
+//!    invalidates only the persisted reasoning (account × model scoping, ADR
+//!    006 §1), not the conversation's identity.
 //!
 //! The tool-call-ID token (ADR 006 §2.2) is deferred to a later PR.
 
@@ -53,7 +57,8 @@ pub struct ConversationKey {
 /// Resolve a stable conversation key per ADR 006 §2. Returns `None` only when
 /// there is neither an explicit key nor any usable conversation head.
 pub fn resolve_conversation_key(headers: &HeaderMap, request: &Value) -> Option<ConversationKey> {
-    // 1a. Explicit `x-conversation-id` header.
+    // 1. Explicit `x-conversation-id` header (the only client-supplied key — see
+    //    module docs on why `user` is excluded).
     if let Some(v) = headers.get(HEADER_NAME).and_then(|h| h.to_str().ok()) {
         let v = v.trim();
         if !v.is_empty() {
@@ -63,23 +68,20 @@ pub fn resolve_conversation_key(headers: &HeaderMap, request: &Value) -> Option<
             });
         }
     }
-    // 1b. Explicit `user` body field.
-    if let Some(user) = request.get("user").and_then(Value::as_str) {
-        let user = user.trim();
-        if !user.is_empty() {
-            return Some(ConversationKey {
-                key: user.to_string(),
-                source: KeySource::Explicit,
-            });
-        }
-    }
-    // 2. Head-hash: instructions + first user text, model excluded.
+    // 2. Head-hash: instructions + first user text, model excluded. Fields are
+    //    length-prefixed so embedded newlines can't make distinct heads collide.
     let instructions = extract_instructions(request);
+    let instructions = instructions.trim();
     let first_user = extract_first_user_text(request);
-    if instructions.trim().is_empty() && first_user.trim().is_empty() {
+    let first_user = first_user.trim();
+    if instructions.is_empty() && first_user.is_empty() {
         return None;
     }
-    let payload = format!("{}\n{}", instructions.trim(), first_user.trim());
+    let payload = format!(
+        "instructions:{}:{instructions}\nfirst_user:{}:{first_user}",
+        instructions.len(),
+        first_user.len(),
+    );
     Some(ConversationKey {
         key: hash_to_uuid(&payload),
         source: KeySource::HeadHash,
@@ -114,22 +116,36 @@ mod tests {
     }
 
     #[test]
-    fn explicit_header_wins_over_user_field() {
-        let mut r = req("gpt-5.4", "sys", "hi");
-        r["user"] = json!("user-field-id");
-        let k = resolve_conversation_key(&headers(&[("x-conversation-id", "header-id")]), &r)
-            .expect("resolves");
-        assert_eq!(k.key, "header-id");
+    fn explicit_header_is_used_verbatim() {
+        let k = resolve_conversation_key(
+            &headers(&[("x-conversation-id", "  header-id  ")]),
+            &req("gpt-5.4", "sys", "hi"),
+        )
+        .expect("resolves");
+        assert_eq!(k.key, "header-id"); // trimmed
         assert_eq!(k.source, KeySource::Explicit);
     }
 
     #[test]
-    fn user_field_used_when_no_header() {
+    fn user_field_is_ignored_falls_through_to_head_hash() {
+        // `user` is a per-end-user id, not a conversation id — it must not key
+        // the conversation (would merge separate chats). Falls through to head.
         let mut r = req("gpt-5.4", "sys", "hi");
-        r["user"] = json!("  user-field-id  ");
+        r["user"] = json!("user-field-id");
         let k = resolve_conversation_key(&HeaderMap::new(), &r).expect("resolves");
-        assert_eq!(k.key, "user-field-id"); // trimmed
-        assert_eq!(k.source, KeySource::Explicit);
+        assert_eq!(k.source, KeySource::HeadHash);
+        assert_ne!(k.key, "user-field-id");
+    }
+
+    #[test]
+    fn head_hash_resists_field_boundary_collisions() {
+        // Length-prefixing means moving a newline across the field boundary
+        // yields distinct keys (naive "a\nb" concat would collide).
+        let a = resolve_conversation_key(&HeaderMap::new(), &req("gpt-5.4", "x", "y\nz"))
+            .expect("resolves");
+        let b = resolve_conversation_key(&HeaderMap::new(), &req("gpt-5.4", "x\ny", "z"))
+            .expect("resolves");
+        assert_ne!(a.key, b.key);
     }
 
     #[test]
@@ -163,11 +179,12 @@ mod tests {
     }
 
     #[test]
-    fn blank_explicit_values_fall_through_to_head_hash() {
-        let mut r = req("gpt-5.4", "sys", "hi");
-        r["user"] = json!("   ");
-        let k = resolve_conversation_key(&headers(&[("x-conversation-id", "  ")]), &r)
-            .expect("resolves");
+    fn blank_header_falls_through_to_head_hash() {
+        let k = resolve_conversation_key(
+            &headers(&[("x-conversation-id", "  ")]),
+            &req("gpt-5.4", "sys", "hi"),
+        )
+        .expect("resolves");
         assert_eq!(k.source, KeySource::HeadHash);
     }
 }

@@ -24,9 +24,14 @@ pub async fn chat_completions(
         .map_err(|_| ApiError::BadRequest("Failed to parse request body".to_string()))?;
 
     // ADR 006 §2: resolve a stable conversation key. Observability only for now
-    // — later phases (account affinity, reasoning persistence) consume it.
+    // — later phases (account affinity, reasoning persistence) consume it. Log a
+    // non-PII fingerprint, never the raw key: an explicit `x-conversation-id` is
+    // client-supplied and could carry sensitive/high-cardinality identifiers.
     let conversation = resolve_conversation_key(&headers, &request);
-    let conversation_key = conversation.as_ref().map_or("", |c| c.key.as_str());
+    let conversation_key_fp = conversation
+        .as_ref()
+        .map(|c| crate::request::hash_to_uuid(&c.key))
+        .unwrap_or_default();
     let conversation_key_source = conversation.as_ref().map_or("none", |c| c.source.as_str());
 
     // Go: only an explicit `"stream": true` selects streaming.
@@ -50,7 +55,7 @@ pub async fn chat_completions(
         model = %normalized_model,
         stream,
         message_count,
-        conversation_key,
+        conversation_key_fp = %conversation_key_fp,
         conversation_key_source,
         "chat completions request",
     );
