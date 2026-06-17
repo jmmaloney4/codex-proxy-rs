@@ -62,6 +62,11 @@ impl AccountPool {
             if slug.is_empty() || url.is_empty() {
                 anyhow::bail!("invalid account entry (empty slug or url): {entry}");
             }
+            // Fail loudly at startup on a malformed URL rather than at request
+            // time — operability hardening.
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                anyhow::bail!("account url must start with http:// or https://: {entry}");
+            }
             accounts.push(Account {
                 slug: slug.to_string(),
                 url: url.to_string(),
@@ -263,14 +268,29 @@ pub async fn proxy(
     match pool.pick(Some(&account.slug)) {
         // A genuinely different account is available — try it.
         Some(alt) if alt.slug != account.slug => {
-            source = "repinned";
             match proxy_to_pod(&state.http, &alt.url, &target, &bearer, &headers, body).await {
-                Ok(resp) => {
+                // Only pin the alt if it actually succeeded — pinning a target
+                // that *also* returned 429/5xx would route future turns to a
+                // failing account. If it failed too, cool it down and leave the
+                // conversation unpinned (the next turn re-picks); still stream
+                // the response so the client sees the real upstream status.
+                Ok(resp) if !is_retryable(resp.status()) => {
+                    source = "repinned";
                     maybe_pin(&state, &conversation_key, &alt.slug, &model, source).await;
                     log_route(
                         &conversation_key_fp,
                         &alt.slug,
                         source,
+                        resp.status().as_u16(),
+                    );
+                    Ok(proxy_response(resp))
+                }
+                Ok(resp) => {
+                    pool.cooldown(&alt.slug);
+                    log_route(
+                        &conversation_key_fp,
+                        &alt.slug,
+                        "repin_failed",
                         resp.status().as_u16(),
                     );
                     Ok(proxy_response(resp))
@@ -381,6 +401,9 @@ mod tests {
         assert!(AccountPool::parse("noequals").is_err());
         assert!(AccountPool::parse("=http://x").is_err());
         assert!(AccountPool::parse("slug=").is_err());
+        // URL must carry an http(s) scheme.
+        assert!(AccountPool::parse("slug=ftp://x").is_err());
+        assert!(AccountPool::parse("slug=host:9879").is_err());
     }
 
     #[test]

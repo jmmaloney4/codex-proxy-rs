@@ -124,6 +124,32 @@ async fn repins_to_a_healthy_account_on_429() {
 }
 
 #[tokio::test]
+async fn does_not_pin_when_the_repin_target_also_fails() {
+    // Both accounts are rate-limited: the router tries one, re-pins to the
+    // other, and when that also 429s it must NOT pin (else future turns route
+    // to a failing account) — but still streams the real 429 to the client.
+    let pod_a = MockUpstream::start(vec![MockResponse::Status(429, "{}".into())]).await;
+    let pod_b = MockUpstream::start(vec![MockResponse::Status(429, "{}".into())]).await;
+
+    let affinity = Arc::new(InMemoryAffinityStore::default());
+    let spec = format!("a={},b={}", pod_a.url, pod_b.url);
+    let app = router(router_state(&spec, Some(affinity.clone())));
+
+    let resp = app.oneshot(chat_req(&convo())).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let key = resolve_conversation_key(&HeaderMap::new(), &convo())
+        .unwrap()
+        .key;
+    assert!(
+        affinity.get(&key).await.is_none(),
+        "must not pin a conversation to a failing account",
+    );
+    assert_eq!(pod_a.hit_count(), 1);
+    assert_eq!(pod_b.hit_count(), 1);
+}
+
+#[tokio::test]
 async fn forwards_w3c_trace_context_to_the_pod() {
     // The pod's spans must nest in the router's trace, so traceparent is
     // forwarded (ADR 005). Query strings on the target are preserved too.
