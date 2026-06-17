@@ -28,10 +28,20 @@ use crate::request::{extract_first_user_text, extract_instructions, hash_to_uuid
 
 const HEADER_NAME: &str = "x-conversation-id";
 
+/// Upper bound on an accepted explicit key. It becomes a store key in later
+/// phases, so reject absurdly long client-supplied values rather than trust them.
+const MAX_EXPLICIT_KEY_LEN: usize = 256;
+
+/// An explicit `x-conversation-id` is usable only if non-empty, bounded, and
+/// free of control characters; otherwise we fall through to the head-hash.
+fn valid_explicit_key(s: &str) -> bool {
+    !s.is_empty() && s.len() <= MAX_EXPLICIT_KEY_LEN && !s.chars().any(char::is_control)
+}
+
 /// How a [`ConversationKey`] was resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeySource {
-    /// Client-supplied via the `x-conversation-id` header or `user` body field.
+    /// Client-supplied via the `x-conversation-id` header.
     Explicit,
     /// Derived by hashing the (model-independent) conversation head.
     HeadHash,
@@ -61,7 +71,7 @@ pub fn resolve_conversation_key(headers: &HeaderMap, request: &Value) -> Option<
     //    module docs on why `user` is excluded).
     if let Some(v) = headers.get(HEADER_NAME).and_then(|h| h.to_str().ok()) {
         let v = v.trim();
-        if !v.is_empty() {
+        if valid_explicit_key(v) {
             return Some(ConversationKey {
                 key: v.to_string(),
                 source: KeySource::Explicit,
@@ -176,6 +186,18 @@ mod tests {
     fn none_when_no_head_and_no_explicit_key() {
         let r = json!({ "model": "gpt-5.4", "messages": [] });
         assert!(resolve_conversation_key(&HeaderMap::new(), &r).is_none());
+    }
+
+    #[test]
+    fn oversized_explicit_key_falls_through_to_head_hash() {
+        let big = "x".repeat(MAX_EXPLICIT_KEY_LEN + 1);
+        let mut h = HeaderMap::new();
+        h.insert(
+            HeaderName::from_static("x-conversation-id"),
+            HeaderValue::from_str(&big).unwrap(),
+        );
+        let k = resolve_conversation_key(&h, &req("gpt-5.4", "sys", "hi")).expect("resolves");
+        assert_eq!(k.source, KeySource::HeadHash);
     }
 
     #[test]
