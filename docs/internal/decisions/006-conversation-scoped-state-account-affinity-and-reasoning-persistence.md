@@ -60,18 +60,57 @@ existing affinity; it is introducing affinity for the first time, in a layer
 that owns account selection.
 
 This ADR records the **design** for conversation-scoped state. It is a planning
-document: the concrete implementation lands in follow-up PRs gated on the spike
-in §Open Questions.
+document: the concrete implementation lands in follow-up PRs. The gating spike
+(formerly Open Questions Q1) has now run — see Spike findings below.
+
+## Spike findings (2026-06-17)
+
+A live spike against `chatgpt.com/backend-api/codex/responses` (read-only use of
+the deployed pods' existing access tokens; **no** token refresh triggered, so
+the rotating refresh tokens were untouched) resolved the central fork and
+confirmed the affinity premise:
+
+- **`store: true` is rejected outright** — `HTTP 400 {"detail":"Store must be
+  set to false"}`. Because `previous_response_id` requires server-side storage
+  (`store: true`), **Family 5a is impossible on this backend.** Confirmed, not
+  inferred.
+- **Stateless `encrypted_content` echo (5b) works end-to-end.** A `store:false`
+  turn returned a `reasoning` item carrying a ~970-char `encrypted_content`
+  blob; echoing that item verbatim into a follow-up request's `input` was
+  accepted (HTTP 200, no `invalid_encrypted_content`) and the model recalled a
+  value it had committed to **only in its hidden reasoning** on the prior turn —
+  a control run without the echoed item could not. So the backend genuinely
+  carries reasoning across *separate* requests.
+- **Structural gotcha:** under `store:false` the `response.completed.output`
+  array comes back **empty** — output items (including the reasoning item)
+  arrive only via individual `response.output_item.done` events. The proxy must
+  accumulate reasoning items from those streamed events to persist them; there
+  is no final aggregated payload to read. (Today they are dropped at
+  `src/transform/upstream.rs:133-141`.)
+- **Affinity premise holds; live cross-account test was blocked.** 2 of 3 codex
+  accounts were `429 usage_limit_reached` at spike time, so the cross-account
+  replay could not be exercised live. Documented evidence stands: the blob is
+  scoped to **account/org *and* model** — a mid-conversation model switch yields
+  `invalid_encrypted_content` (openai/codex#17541) and an account switch yields
+  an `organization_id` mismatch. The pin must therefore be **(account × model)**,
+  and any model change must invalidate the reasoning record.
+
+**Net:** the §5 fork collapses — 5a is out, **5b is the only mechanism and is
+proven buildable**; the ZDR/retention concern (formerly Q4) is moot because 5b
+is `store:false` with no server-side retention.
 
 ## Decision
 
 ### 1. One feature: a conversation-keyed state record
 
-Introduce a single per-conversation state record holding **both** the pinned
-`account_id` **and** the reasoning continuation handle. Affinity and reasoning
-persistence are implemented together because they share identity + storage and
-because reasoning replay is invalid without affinity. Shipping order is layered
-(§7), but they are not independent features.
+Introduce a single per-conversation state record holding **both** the pin —
+`(account_id, model)`, not account alone (the spike confirmed the blob is
+model-scoped too) — **and** the ordered reasoning blobs (§5). Affinity and
+reasoning persistence are implemented together because they share identity +
+storage and because reasoning replay is invalid without affinity. A change of
+model on an existing conversation **invalidates** the reasoning blobs (they
+cannot be decrypted by a different model) even though the account pin may hold.
+Shipping order is layered (§7), but they are not independent features.
 
 ### 2. Conversation identity (the crux) — layered resolution
 
@@ -121,32 +160,34 @@ isolation.
 ### 4. State store
 
 A **shared external KV (Redis)** keyed by conversation id, values:
-`{ account_id, continuation_handle, updated_at }`, with a **short TTL** (hours —
+`{ account_id, model, reasoning_blobs[], updated_at }`, with a **short TTL** (hours —
 conversations are ephemeral; TTL is the eviction story). In-proxy memory is
 rejected: it fails the moment there is more than one replica or the router
 restarts. The existing garden Cloud SQL is a fallback if a new Redis is
 unwanted, but TTL + churn make Redis the better fit.
 
-### 5. Persistence mechanism — prefer server-side state, fall back to blob echo
+### 5. Persistence mechanism — stateless `encrypted_content` echo (only viable path)
 
-Two families; the choice is gated on a backend capability spike (§Open
-Questions):
+The spike settled this. `store: true` / `previous_response_id` is rejected by
+the backend (`400 "Store must be set to false"`), so the server-side-state
+option is **removed** — it cannot be built. The only mechanism is stateless
+`encrypted_content` echo, which the spike proved works end-to-end:
 
-- **5a. `store: true` + `previous_response_id` (preferred, pending
-  verification).** Let OpenAI hold the reasoning server-side; persist only
-  `(conversation → last response_id + account)`. No blob storage, no input
-  splicing — dramatically simpler. Requires flipping `store` (currently forced
-  `false` at `src/request.rs:515`) and accepting OpenAI-side retention
-  (privacy/ZDR consideration). **Unverified that the ChatGPT/Codex backend
-  honors `store: true` / `previous_response_id`** the way the public API does —
-  this is the gating spike.
-- **5b. `store: false` + echo `encrypted_content` (fallback).** Stop dropping
-  reasoning items (`src/transform/upstream.rs:133-141`), store the ordered blobs
-  per conversation, and **splice them back into the reconstructed Responses
-  `input`**, aligned to each assistant/tool turn. Full control, no OpenAI
-  retention — but alignment is brittle: if the client trimmed or reordered
-  history, turn indices drift, so the proxy must detect misalignment and fall
-  back (§5c).
+- Keep `store: false` and `include: ["reasoning.encrypted_content"]` (already
+  set at `src/request.rs:481,584`).
+- **Accumulate reasoning items from the streamed `response.output_item.done`
+  events** — *not* from `response.completed`, which is empty under `store:false`
+  (Spike findings) — and persist the ordered blobs per conversation. This is the
+  response-side change; today they are dropped at
+  `src/transform/upstream.rs:133-141`.
+- On the next turn, **splice the stored reasoning items back into the
+  reconstructed Responses `input`**, aligned to each assistant/tool turn and
+  echoed verbatim, exactly as the official Codex CLI does.
+
+Alignment is the brittle part: if the client trimmed or reordered history, turn
+indices drift, so the proxy must detect misalignment and fall back (§5c). The
+blobs are valid only for the pinned `(account, model)` — a model change
+invalidates them (§1).
 
 ### 5c. Best-effort with stateless fallback (safety principle)
 
@@ -163,7 +204,10 @@ A pinned account that is rate-limited or down forces a choice: wait, or break
 affinity. Decision: **break affinity and re-pin** (drop the conversation's
 reasoning, pick a healthy account, continue) rather than fail or stall —
 consistent with §5c. Reasoning loss on failover is acceptable; a stalled agent
-loop is not.
+loop is not. This is not hypothetical: the spike found **2 of 3 codex accounts
+returning `429 usage_limit_reached`**, so re-pin-on-429 is a primary path the
+router must handle, not an edge case. (A model change triggers the same
+reasoning-drop via §1, while the account pin may survive.)
 
 ### 7. Shipping order
 
@@ -174,8 +218,9 @@ loop is not.
    router endpoint; router does weighted pick + failover for new conversations.
    Useful on its own (prompt-cache locality, fewer account hops) **without any
    reasoning work**.
-3. **Reasoning replay** — spike §5a; ship it if supported, else §5b. Always
-   behind §5c.
+3. **Reasoning replay** — §5 (`encrypted_content` echo; 5a is ruled out).
+   Accumulate reasoning items from `output_item.done`, persist, splice back.
+   Always behind §5c.
 
 ## Non-goals (by decision)
 
@@ -194,38 +239,57 @@ loop is not.
 
 ## Risks
 
-- **Backend `store: true` support is unverified (gates §5).** If unsupported,
-  the simpler design (5a) is off the table and 5b's splicing/alignment cost is
-  unavoidable. Spike first; do not build storage before this is known.
+- **Reasoning-item splicing/alignment is the unavoidable cost (§5).** With 5a
+  ruled out (spike), there is no simpler path: the proxy must accumulate
+  reasoning items from the stream, persist them, and re-inject them in the right
+  positions. Misalignment must fail safe to stateless (§5c).
+- **Echoing `encrypted_content` + `reasoning` can hang the backend.** Reports
+  associate this combination with the backend entering a "thinking" state that
+  times out internally — consistent with the known gpt-5.x pool timeouts.
+  Re-injection must be guarded by the relay's keepalive/timeout discipline
+  (ADR 002/005) and fail safe to stateless.
 - **Loss of LiteLLM load-balancing/failover for codex (§3).** The router must
   reimplement weighted selection, health checks, and usage accounting that
-  LiteLLM provides today. Underestimating this is the main schedule risk.
+  LiteLLM provides today. With 2/3 accounts usage-limited at spike time,
+  re-pin-on-429 is a hot path, not an edge case. Main schedule risk.
 - **Identity fragility (§2).** Head-hash breaks on history compaction;
   tool-call-ID only spans tool loops. Without an explicit key, some
   conversations will silently fall back to stateless (acceptable per §5c, but
   caps the hit rate).
-- **OpenAI-side retention with `store: true`.** A data-posture decision, not
-  just a technical one; must be signed off before 5a.
 - **State store as a new dependency / failure mode.** Redis outage must
   degrade to §5c, never block the request path (mirror ADR 005's
   fire-and-forget export discipline).
 
-## Open Questions (resolve before implementation)
+## Open Questions
 
-1. **Does the ChatGPT/Codex backend honor `store: true` + `previous_response_id`
-   (and how does it interact with `include: reasoning.encrypted_content`)?** The
-   single biggest fork (§5a vs §5b). Spike this first.
-2. **Can hermes / goose / pr-converge pass a stable conversation id through
+Resolved by the 2026-06-17 spike:
+
+- ~~Q1: Does the backend honor `store: true` + `previous_response_id`?~~
+  **Resolved: no** (`400 "Store must be set to false"`). §5 is `encrypted_content`
+  echo only.
+- ~~Q4: Is OpenAI-side retention acceptable?~~ **Moot** — 5b is `store:false`,
+  no server-side retention.
+
+Still open (resolve before / during implementation):
+
+1. **Can hermes / goose / pr-converge pass a stable conversation id through
    LiteLLM** (header or `user`), or do we rely on tool-call-ID + head-hash?
-3. **Router (3a) vs. fat proxy (3b)** — final call on whether single-account
+   (Garden already forwards `traceparent` to codex-proxy — `proxy-plan.ts:711` —
+   so the header mechanism has precedent.)
+2. **Router (3a) vs. fat proxy (3b)** — final call on whether single-account
    credential isolation is worth the extra hop.
-4. **Is OpenAI-side retention acceptable** for the data posture if §5a wins?
+3. **Live cross-account/model scoping confirmation.** The spike's documented
+   evidence (openai/codex#17541) is strong but the live replay was blocked by
+   `429`s on 2/3 accounts; confirm against the real blob once quota frees up,
+   before relying on the (account × model) invalidation rule in anger.
 
 ## Related
 
 - ADR 004 — server + per-account credentials / `auth.json` model this builds on
 - ADR 005 — deployment topology (one pod per account, LiteLLM in front)
 - #10 — buffered `reasoning_content` drop (the narrower, independent bug)
+- openai/codex#17541 — model-switch → `invalid_encrypted_content` (blob is
+  model-scoped; basis for the (account × model) pin)
 - `src/request.rs:481,515,584` — `store: false`, `include: encrypted_content`
 - `src/transform/mod.rs:236` — summary → `reasoning_content` (streaming)
 - `src/transform/upstream.rs:133-141` — `encrypted_content` explicitly dropped
