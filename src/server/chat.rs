@@ -3,6 +3,7 @@
 
 use axum::body::Bytes;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Json, Response};
 use serde_json::Value;
 
@@ -10,15 +11,23 @@ use super::AppState;
 use super::error::ApiError;
 use super::stream::{RelayMode, mirror_error_response, relay_response, response_reader};
 use crate::buffered::buffer_chat_completion;
+use crate::conversation::resolve_conversation_key;
 use crate::request::build_codex_request_body;
 use crate::upstream::send_with_retry;
 
 pub async fn chat_completions(
     State(state): State<AppState>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
     let request: Value = serde_json::from_slice(&body)
         .map_err(|_| ApiError::BadRequest("Failed to parse request body".to_string()))?;
+
+    // ADR 006 §2: resolve a stable conversation key. Observability only for now
+    // — later phases (account affinity, reasoning persistence) consume it.
+    let conversation = resolve_conversation_key(&headers, &request);
+    let conversation_key = conversation.as_ref().map_or("", |c| c.key.as_str());
+    let conversation_key_source = conversation.as_ref().map_or("none", |c| c.source.as_str());
 
     // Go: only an explicit `"stream": true` selects streaming.
     let stream = request
@@ -41,6 +50,8 @@ pub async fn chat_completions(
         model = %normalized_model,
         stream,
         message_count,
+        conversation_key,
+        conversation_key_source,
         "chat completions request",
     );
 

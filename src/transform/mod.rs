@@ -48,6 +48,12 @@ pub struct SSETransformer {
     pub tool_name_by_item_id: HashMap<String, String>,
     pub next_tool_index: usize,
     pub saw_tool_calls: bool,
+    // ADR 006 §5 / Spike: per-response reasoning-capture counters, emitted as
+    // tracing fields at `response.completed`. Observability only — they do not
+    // affect emitted frames.
+    pub reasoning_items: usize,
+    pub reasoning_encrypted_bytes: usize,
+    pub reasoning_summary_present: bool,
 }
 
 const DEFAULT_MODEL: &str = "gpt-5";
@@ -69,6 +75,9 @@ impl SSETransformer {
             tool_name_by_item_id: HashMap::new(),
             next_tool_index: 0,
             saw_tool_calls: false,
+            reasoning_items: 0,
+            reasoning_encrypted_bytes: 0,
+            reasoning_summary_present: false,
         }
     }
 
@@ -81,6 +90,9 @@ impl SSETransformer {
         self.tool_name_by_item_id.clear();
         self.next_tool_index = 0;
         self.saw_tool_calls = false;
+        self.reasoning_items = 0;
+        self.reasoning_encrypted_bytes = 0;
+        self.reasoning_summary_present = false;
     }
 
     fn send_role(&mut self, seq: Option<u64>) -> Result<Option<Vec<u8>>, TransformError> {
@@ -122,6 +134,24 @@ impl SSETransformer {
         serde_json::to_vec(&chunk).map_err(|e| TransformError::MarshalError(e.to_string()))
     }
 
+    /// Accumulate reasoning-capture stats from a `response.output_item.done`
+    /// event (ADR 006 §5). No-op for non-reasoning items.
+    fn note_reasoning_item(&mut self, envelope: &EventEnvelope) {
+        if let Some(item) = upstream::reasoning_item_from_output_item_done(envelope) {
+            tracing::debug!(
+                reasoning_item_id = item.id.as_deref().unwrap_or(""),
+                encrypted = item.encrypted_content.is_some(),
+                summary = item.summary_text.is_some(),
+                "captured reasoning item",
+            );
+            self.reasoning_items += 1;
+            if let Some(enc) = &item.encrypted_content {
+                self.reasoning_encrypted_bytes += enc.len();
+            }
+            self.reasoning_summary_present |= item.summary_text.is_some();
+        }
+    }
+
     pub fn transform(&mut self, data: &[u8]) -> Result<TransformResult, TransformError> {
         let trimmed = data.trim_ascii();
         if trimmed.is_empty() {
@@ -149,10 +179,17 @@ impl SSETransformer {
             "response.function_call_arguments.delta" => {
                 self.handle_function_call_args_delta(&envelope, seq)
             }
+            // Reasoning items finalize here (ADR 006 §5 / Spike: under
+            // store:false they arrive via output_item.done, not completed).
+            // Accumulate capture stats; still no downstream emission.
+            "response.output_item.done" => {
+                self.note_reasoning_item(&envelope);
+                Ok(TransformResult::Swallowed)
+            }
             // Explicitly ignored: handled but no emission
-            "response.function_call_arguments.done"
-            | "response.output_item.done"
-            | "response.output_text.done" => Ok(TransformResult::Swallowed),
+            "response.function_call_arguments.done" | "response.output_text.done" => {
+                Ok(TransformResult::Swallowed)
+            }
             // Unknown events: handled but no emission
             _ => Ok(TransformResult::Swallowed),
         }
@@ -219,6 +256,18 @@ impl SSETransformer {
         } else {
             "stop"
         };
+
+        // ADR 006 §5 / Spike: surface what reasoning the upstream returned this
+        // response (encrypted_content is dropped from the client stream today;
+        // this just records that we received it, for the persistence phase).
+        if self.reasoning_items > 0 {
+            tracing::info!(
+                reasoning_items = self.reasoning_items,
+                reasoning_encrypted_bytes = self.reasoning_encrypted_bytes,
+                reasoning_summary_present = self.reasoning_summary_present,
+                "codex reasoning captured",
+            );
+        }
 
         // Always emit usage: prefer upstream values, fall back to zeroed.
         let usage = match payload.response.usage.as_ref() {

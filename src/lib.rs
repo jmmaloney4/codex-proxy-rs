@@ -1,5 +1,6 @@
 pub mod buffered;
 pub mod config;
+pub mod conversation;
 pub mod credentials;
 pub mod model;
 pub mod prompts;

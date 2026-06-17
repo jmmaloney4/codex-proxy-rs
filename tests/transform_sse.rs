@@ -20,6 +20,65 @@ fn parse_json_lines(bytes: &[u8]) -> Vec<Value> {
         .collect()
 }
 
+// --- reasoning capture (ADR 006 §5 / spike) ---
+
+#[rstest]
+fn captures_reasoning_item_from_output_item_done() {
+    // store:false shape: the reasoning item (with its encrypted_content blob)
+    // arrives via output_item.done. It is swallowed (not emitted to the client)
+    // but counted for observability.
+    let mut transformer = SSETransformer::new("gpt-5.4");
+    let event = br#"{"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"ABCDEF","summary":[{"type":"summary_text","text":"thinking"}]}}"#;
+
+    let result = transformer.transform(event).expect("transform succeeds");
+
+    assert!(matches!(result, TransformResult::Swallowed));
+    assert_eq!(transformer.reasoning_items, 1);
+    assert_eq!(transformer.reasoning_encrypted_bytes, 6); // "ABCDEF"
+    assert!(transformer.reasoning_summary_present);
+}
+
+#[rstest]
+fn reasoning_item_without_encrypted_content_still_counts() {
+    let mut transformer = SSETransformer::new("gpt-5.4");
+    let event = br#"{"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"thinking"}]}}"#;
+
+    transformer.transform(event).expect("transform succeeds");
+
+    assert_eq!(transformer.reasoning_items, 1);
+    assert_eq!(transformer.reasoning_encrypted_bytes, 0);
+    assert!(transformer.reasoning_summary_present);
+}
+
+#[rstest]
+fn ignores_non_reasoning_output_item_done() {
+    let mut transformer = SSETransformer::new("gpt-5");
+    let event = br#"{"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_1"}}"#;
+
+    let result = transformer.transform(event).expect("transform succeeds");
+
+    assert!(matches!(result, TransformResult::Swallowed));
+    assert_eq!(transformer.reasoning_items, 0);
+    assert_eq!(transformer.reasoning_encrypted_bytes, 0);
+    assert!(!transformer.reasoning_summary_present);
+}
+
+#[rstest]
+fn reasoning_counters_reset_on_response_created() {
+    let mut transformer = SSETransformer::new("gpt-5.4");
+    transformer.reasoning_items = 3;
+    transformer.reasoning_encrypted_bytes = 900;
+    transformer.reasoning_summary_present = true;
+
+    transformer
+        .transform(br#"{"type":"response.created","sequence_number":0,"response":{"id":"resp_x"}}"#)
+        .expect("transform succeeds");
+
+    assert_eq!(transformer.reasoning_items, 0);
+    assert_eq!(transformer.reasoning_encrypted_bytes, 0);
+    assert!(!transformer.reasoning_summary_present);
+}
+
 // --- response.created ---
 
 #[rstest]
