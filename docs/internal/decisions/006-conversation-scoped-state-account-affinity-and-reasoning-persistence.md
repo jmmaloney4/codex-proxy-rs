@@ -229,7 +229,8 @@ reasoning-drop via §1, while the account pin may survive.)
 - **No client-echoed encrypted reasoning.** Standard clients strip unknown
   fields and DeepSeek-style APIs reject echoed `reasoning_content`; relying on
   clients to round-trip an account-scoped blob is rejected in favor of
-  server-side state (§4).
+  proxy-side state (§4) — distinct from OpenAI-side `store:true`, which the
+  spike proved is rejected outright.
 - **No change to the `/v1/responses` passthrough.** Native Responses clients
   already get full reasoning items; this ADR is about the chat-completions
   façade only.
