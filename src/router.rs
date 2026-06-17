@@ -49,7 +49,8 @@ impl AccountPool {
     /// URLs are trimmed so path joining is unambiguous.
     pub fn parse(spec: &str) -> anyhow::Result<Self> {
         let mut accounts = Vec::new();
-        let mut seen = HashSet::new();
+        let mut seen_slugs = HashSet::new();
+        let mut seen_urls = HashSet::new();
         for entry in spec.split(',') {
             let entry = entry.trim();
             if entry.is_empty() {
@@ -76,9 +77,14 @@ impl AccountPool {
                 Err(err) => anyhow::bail!("invalid account url ({err}): {entry}"),
             }
             // Duplicate slugs would make pins resolve ambiguously (a pin stores
-            // only the slug) — reject them.
-            if !seen.insert(slug.to_string()) {
+            // only the slug). Duplicate URLs (distinct slugs → the same pod)
+            // defeat failover — cooling one slug just re-routes to the same
+            // failing pod. Reject both.
+            if !seen_slugs.insert(slug.to_string()) {
                 anyhow::bail!("duplicate account slug: {slug}");
+            }
+            if !seen_urls.insert(url.to_string()) {
+                anyhow::bail!("duplicate account url ({url}) — slugs must point at distinct pods");
             }
             accounts.push(Account {
                 slug: slug.to_string(),
@@ -419,6 +425,8 @@ mod tests {
         assert!(AccountPool::parse("slug=host:9879").is_err());
         // Duplicate slugs are ambiguous for pin resolution.
         assert!(AccountPool::parse("main=http://a,main=http://b").is_err());
+        // Duplicate URLs defeat failover.
+        assert!(AccountPool::parse("main=http://a,codex2=http://a").is_err());
     }
 
     #[test]

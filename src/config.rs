@@ -63,10 +63,12 @@ pub struct Config {
     )]
     pub redis_url: Option<String>,
 
-    /// Router mode: affinity pin TTL in seconds (default 1 day).
+    /// Router mode: affinity pin TTL in seconds (default 1 day). Must be ≥ 1 —
+    /// Redis `SET … EX 0` is a protocol error that would silently drop pins.
     #[arg(
         long = "affinity-ttl-secs",
         env = "CODEX_PROXY_AFFINITY_TTL_SECS",
+        value_parser = clap::value_parser!(u64).range(1..),
         default_value_t = 86_400
     )]
     pub affinity_ttl_secs: u64,
