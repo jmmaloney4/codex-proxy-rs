@@ -65,15 +65,24 @@ impl AccountPool {
                 anyhow::bail!("invalid account entry (empty slug or url): {entry}");
             }
             // Fail loudly at startup on a malformed URL rather than at request
-            // time — full parse, not just a scheme prefix.
+            // time. Must be a bare http(s) origin: `proxy_to_pod` builds the
+            // target as `{base_url}{path_and_query}`, so a path/query/fragment on
+            // the base (e.g. `https://pod/v1`) would corrupt every target.
             match reqwest::Url::parse(url) {
-                Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => {}
-                Ok(parsed) => {
+                Ok(parsed) if !matches!(parsed.scheme(), "http" | "https") => anyhow::bail!(
+                    "account url scheme must be http/https, got {}: {entry}",
+                    parsed.scheme()
+                ),
+                Ok(parsed)
+                    if parsed.path() != "/"
+                        || parsed.query().is_some()
+                        || parsed.fragment().is_some() =>
+                {
                     anyhow::bail!(
-                        "account url scheme must be http/https, got {}: {entry}",
-                        parsed.scheme()
+                        "account url must be a bare origin (no path/query/fragment): {entry}"
                     )
                 }
+                Ok(_) => {}
                 Err(err) => anyhow::bail!("invalid account url ({err}): {entry}"),
             }
             // Duplicate slugs would make pins resolve ambiguously (a pin stores
@@ -427,6 +436,10 @@ mod tests {
         assert!(AccountPool::parse("main=http://a,main=http://b").is_err());
         // Duplicate URLs defeat failover.
         assert!(AccountPool::parse("main=http://a,codex2=http://a").is_err());
+        // Base URL must be a bare origin (no path/query/fragment) — proxy_to_pod
+        // appends the request path.
+        assert!(AccountPool::parse("slug=http://pod/v1").is_err());
+        assert!(AccountPool::parse("slug=http://pod?x=1").is_err());
     }
 
     #[test]
