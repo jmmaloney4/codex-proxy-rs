@@ -139,24 +139,34 @@ impl AccountPool {
     }
 }
 
-/// Forward the (already OpenAI-shaped) request to a backend pod verbatim. No
-/// codex headers and no credential refresh — the pod owns those. The shared
-/// `ADMIN_API_KEY` bearer authenticates router→pod (same key the router itself
-/// is gated on).
+/// W3C trace-context headers forwarded to the backend pod so its spans nest in
+/// the same trace as the router/LiteLLM call (ADR 005 distributed tracing).
+const FORWARDED_HEADERS: [&str; 2] = ["traceparent", "tracestate"];
+
+/// Forward the (already OpenAI-shaped) request to a backend pod verbatim. The
+/// router sets `authorization` (the shared `ADMIN_API_KEY`, which gates the pod)
+/// and `content-type` itself, and forwards W3C trace context; everything else is
+/// intentionally not forwarded (codex headers are pod-generated; hop-by-hop
+/// headers must not cross the proxy). `path_and_query` preserves any query
+/// string on the original request target.
 async fn proxy_to_pod(
     client: &reqwest::Client,
     base_url: &str,
-    path: &str,
+    path_and_query: &str,
     bearer: &str,
+    inbound: &HeaderMap,
     body: Bytes,
 ) -> Result<reqwest::Response, reqwest::Error> {
-    client
-        .post(format!("{base_url}{path}"))
+    let mut req = client
+        .post(format!("{base_url}{path_and_query}"))
         .header("authorization", format!("Bearer {bearer}"))
-        .header("content-type", "application/json")
-        .body(body)
-        .send()
-        .await
+        .header("content-type", "application/json");
+    for name in FORWARDED_HEADERS {
+        if let Some(value) = inbound.get(name) {
+            req = req.header(name, value.clone());
+        }
+    }
+    req.body(body).send().await
 }
 
 fn is_retryable(status: reqwest::StatusCode) -> bool {
@@ -180,7 +190,12 @@ pub async fn proxy(
         .as_ref()
         .ok_or(ApiError::AdminNotConfigured)?
         .clone();
-    let path = uri.path().to_string();
+    // Preserve any query string on the request target, not just the path.
+    let target = uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or_else(|| uri.path())
+        .to_string();
 
     let request: Value = serde_json::from_slice(&body)
         .map_err(|_| ApiError::BadRequest("Failed to parse request body".to_string()))?;
@@ -216,7 +231,15 @@ pub async fn proxy(
         ),
     };
 
-    let first = proxy_to_pod(&state.http, &account.url, &path, &bearer, body.clone()).await;
+    let first = proxy_to_pod(
+        &state.http,
+        &account.url,
+        &target,
+        &bearer,
+        &headers,
+        body.clone(),
+    )
+    .await;
     let first_ok_terminal = matches!(&first, Ok(resp) if !is_retryable(resp.status()));
 
     if first_ok_terminal {
@@ -241,7 +264,7 @@ pub async fn proxy(
         // A genuinely different account is available — try it.
         Some(alt) if alt.slug != account.slug => {
             source = "repinned";
-            match proxy_to_pod(&state.http, &alt.url, &path, &bearer, body).await {
+            match proxy_to_pod(&state.http, &alt.url, &target, &bearer, &headers, body).await {
                 Ok(resp) => {
                     maybe_pin(&state, &conversation_key, &alt.slug, &model, source).await;
                     log_route(

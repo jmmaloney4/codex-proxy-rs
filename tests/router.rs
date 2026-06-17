@@ -124,6 +124,31 @@ async fn repins_to_a_healthy_account_on_429() {
 }
 
 #[tokio::test]
+async fn forwards_w3c_trace_context_to_the_pod() {
+    // The pod's spans must nest in the router's trace, so traceparent is
+    // forwarded (ADR 005). Query strings on the target are preserved too.
+    let pod = MockUpstream::start(vec![MockResponse::Sse("data: ok\n\n".into())]).await;
+    let app = router(router_state(&format!("a={}", pod.url), None));
+
+    let mut req = chat_req(&convo());
+    req.headers_mut().insert(
+        "traceparent",
+        "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+            .parse()
+            .unwrap(),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let captured = pod.headers.lock().await;
+    assert_eq!(captured.len(), 1);
+    assert!(
+        captured[0].get("traceparent").is_some(),
+        "traceparent must be forwarded so the pod span nests in the trace",
+    );
+}
+
+#[tokio::test]
 async fn routes_statelessly_without_an_affinity_store() {
     // No Redis configured → no pinning, but requests still proxy (ADR 006 §5c).
     let pod_a = MockUpstream::start(vec![MockResponse::Sse("data: from-a\n\n".into())]).await;
