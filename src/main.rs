@@ -19,26 +19,32 @@ async fn main() -> anyhow::Result<()> {
     let tracer_provider = init_tracing(&config.env);
 
     let http = build_upstream_client();
-    let creds: Arc<dyn CredentialsFetcher> = match config.creds_store {
-        CredsStore::Env => Arc::new(EnvCredentials::new(
-            config.anthropic_api_key.clone(),
-            config.claude_user_id.clone(),
-        )),
-        CredsStore::Fs => {
-            let path = match config.creds_path.clone() {
-                Some(path) => {
-                    if !path.is_absolute() {
-                        anyhow::bail!("--creds-path must be an absolute path");
+    // Router mode never calls the codex backend (the backend pods do), so it
+    // needs no credential store — and must not spawn the fs OAuth refresh
+    // loop. Use empty static creds there; only backend mode builds a real store.
+    let creds: Arc<dyn CredentialsFetcher> = match config.mode {
+        ProxyMode::Router => Arc::new(EnvCredentials::new(String::new(), String::new())),
+        ProxyMode::Backend => match config.creds_store {
+            CredsStore::Env => Arc::new(EnvCredentials::new(
+                config.anthropic_api_key.clone(),
+                config.claude_user_id.clone(),
+            )),
+            CredsStore::Fs => {
+                let path = match config.creds_path.clone() {
+                    Some(path) => {
+                        if !path.is_absolute() {
+                            anyhow::bail!("--creds-path must be an absolute path");
+                        }
+                        path
                     }
-                    path
-                }
-                None => default_creds_path()?,
-            };
-            tracing::info!(path = %path.display(), "using filesystem credential store");
-            let fetcher = Arc::new(OAuthFetcher::new(FsAuthFile::new(path), http.clone()));
-            fetcher.spawn_background_refresh();
-            fetcher
-        }
+                    None => default_creds_path()?,
+                };
+                tracing::info!(path = %path.display(), "using filesystem credential store");
+                let fetcher = Arc::new(OAuthFetcher::new(FsAuthFile::new(path), http.clone()));
+                fetcher.spawn_background_refresh();
+                fetcher
+            }
+        },
     };
 
     // Backend-mode startup validation, warn-only like Go. Router mode does not

@@ -7,7 +7,7 @@
 //! affinity is best-effort: a Redis miss/outage degrades to stateless
 //! round-robin, never a failed request (ADR 006 §5c).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -49,6 +49,7 @@ impl AccountPool {
     /// URLs are trimmed so path joining is unambiguous.
     pub fn parse(spec: &str) -> anyhow::Result<Self> {
         let mut accounts = Vec::new();
+        let mut seen = HashSet::new();
         for entry in spec.split(',') {
             let entry = entry.trim();
             if entry.is_empty() {
@@ -63,9 +64,21 @@ impl AccountPool {
                 anyhow::bail!("invalid account entry (empty slug or url): {entry}");
             }
             // Fail loudly at startup on a malformed URL rather than at request
-            // time — operability hardening.
-            if !(url.starts_with("http://") || url.starts_with("https://")) {
-                anyhow::bail!("account url must start with http:// or https://: {entry}");
+            // time — full parse, not just a scheme prefix.
+            match reqwest::Url::parse(url) {
+                Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => {}
+                Ok(parsed) => {
+                    anyhow::bail!(
+                        "account url scheme must be http/https, got {}: {entry}",
+                        parsed.scheme()
+                    )
+                }
+                Err(err) => anyhow::bail!("invalid account url ({err}): {entry}"),
+            }
+            // Duplicate slugs would make pins resolve ambiguously (a pin stores
+            // only the slug) — reject them.
+            if !seen.insert(slug.to_string()) {
+                anyhow::bail!("duplicate account slug: {slug}");
             }
             accounts.push(Account {
                 slug: slug.to_string(),
@@ -404,6 +417,8 @@ mod tests {
         // URL must carry an http(s) scheme.
         assert!(AccountPool::parse("slug=ftp://x").is_err());
         assert!(AccountPool::parse("slug=host:9879").is_err());
+        // Duplicate slugs are ambiguous for pin resolution.
+        assert!(AccountPool::parse("main=http://a,main=http://b").is_err());
     }
 
     #[test]
