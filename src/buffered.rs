@@ -8,8 +8,11 @@
 //! Go aggregates only `role`/`content`/`finish_reason` — its non-streaming
 //! response silently drops tool calls and usage, so non-streaming tool use is
 //! broken upstream. This port additionally aggregates `delta.tool_calls`
-//! (arguments concatenated per tool index) and `usage` (last non-null wins).
-//! Both are additive JSON fields; clients that ignore them see Go's exact
+//! (arguments concatenated per tool index), `usage` (last non-null wins), and
+//! `delta.reasoning_content` (concatenated, mirroring `content`) — the last so
+//! reasoning summaries reach non-streaming callers, matching the streaming path
+//! which already emits them (`transform::SSETransformer::handle_reasoning`).
+//! All three are additive JSON fields; clients that ignore them see Go's exact
 //! shape.
 
 use std::collections::BTreeMap;
@@ -58,6 +61,8 @@ struct StreamingDelta {
     #[serde(default)]
     content: Option<String>,
     #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
     tool_calls: Option<Vec<ToolCallDelta>>,
 }
 
@@ -104,6 +109,7 @@ pub async fn buffer_chat_completion<R: AsyncBufRead + Unpin>(
     let mut created: i64 = 0;
     let mut role = String::new();
     let mut content = String::new();
+    let mut reasoning_content = String::new();
     let mut finish_reason = String::new();
     let mut tool_calls: BTreeMap<usize, ToolCallAccumulator> = BTreeMap::new();
     let mut usage: Option<Value> = None;
@@ -141,6 +147,9 @@ pub async fn buffer_chat_completion<R: AsyncBufRead + Unpin>(
                 }
                 if let Some(c) = choice.delta.content {
                     content.push_str(&c);
+                }
+                if let Some(rc) = choice.delta.reasoning_content {
+                    reasoning_content.push_str(&rc);
                 }
                 if let Some(f) = choice.finish_reason
                     && !f.is_empty()
@@ -205,6 +214,9 @@ pub async fn buffer_chat_completion<R: AsyncBufRead + Unpin>(
             })
             .collect();
         message["tool_calls"] = Value::Array(calls);
+    }
+    if !reasoning_content.is_empty() {
+        message["reasoning_content"] = Value::String(reasoning_content);
     }
 
     let mut response = json!({
