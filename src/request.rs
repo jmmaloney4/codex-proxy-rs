@@ -126,6 +126,20 @@ fn build_reasoning_settings(request: &Value) -> Value {
     Value::Object(settings)
 }
 
+/// SHA-256 of `payload` rendered as a version-5/RFC-4122 UUID string. The
+/// shared rendering behind `derive_prompt_cache_key` and the conversation
+/// head-hash (`crate::conversation`). `from_sha1_bytes` sets version 5 +
+/// RFC-4122 variant, identical to the Go bit-twiddling
+/// (`b[6] = (b[6] & 0x0f) | 0x50; b[8] = (b[8] & 0x3f) | 0x80`).
+pub(crate) fn hash_to_uuid(payload: &str) -> String {
+    let digest = Sha256::digest(payload.as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    uuid::Builder::from_sha1_bytes(bytes)
+        .into_uuid()
+        .to_string()
+}
+
 /// Port of Go `derivePromptCacheKey` + `formatUUID`: SHA-256 of
 /// `model\ninstructions\nfirstUserText` (each trimmed) rendered as a
 /// version-5/RFC-4122 UUID. Empty string when all three inputs are empty.
@@ -136,21 +150,13 @@ pub fn derive_prompt_cache_key(model: &str, instructions: &str, first_user_text:
     if model.is_empty() && instructions.is_empty() && first_user_text.is_empty() {
         return String::new();
     }
-    let payload = format!("{model}\n{instructions}\n{first_user_text}");
-    let digest = Sha256::digest(payload.as_bytes());
-    let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(&digest[..16]);
-    // `from_sha1_bytes` sets version 5 + RFC-4122 variant, identical to the Go
-    // bit-twiddling (`b[6] = (b[6] & 0x0f) | 0x50; b[8] = (b[8] & 0x3f) | 0x80`).
-    uuid::Builder::from_sha1_bytes(bytes)
-        .into_uuid()
-        .to_string()
+    hash_to_uuid(&format!("{model}\n{instructions}\n{first_user_text}"))
 }
 
 /// Port of Go `extractInstructions`: concatenate all `system`-role message text
 /// (names replaced), joining content segments with `\n` and messages with
 /// `\n\n`.
-fn extract_instructions(request: &Value) -> String {
+pub(crate) fn extract_instructions(request: &Value) -> String {
     let Some(msgs) = request.get("messages").and_then(Value::as_array) else {
         return String::new();
     };
@@ -189,7 +195,7 @@ fn extract_instructions(request: &Value) -> String {
 /// Port of Go `extractFirstUserText`: first non-empty `user` text from the
 /// codex `input` array, falling back to chat-completions `messages`. Names
 /// replaced.
-fn extract_first_user_text(body: &Value) -> String {
+pub(crate) fn extract_first_user_text(body: &Value) -> String {
     if let Some(input) = body.get("input").and_then(Value::as_array) {
         for entry in input {
             let Some(em) = entry.as_object() else {

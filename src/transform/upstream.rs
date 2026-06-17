@@ -168,3 +168,40 @@ fn extract_summary_text(summary: Option<&Value>) -> Option<String> {
     }
     None
 }
+
+/// A reasoning output item captured from a `response.output_item.done` event.
+///
+/// Under `store:false` (ADR 006 spike) the reasoning item — including its
+/// account/model-scoped `encrypted_content` blob — arrives via
+/// `response.output_item.done`, **not** in the `response.completed` output
+/// array (which is empty). This is the typed primitive a later phase persists
+/// and replays (ADR 006 §5); for now it backs observability only and the
+/// existing drop in `extract_reasoning_content` is untouched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReasoningItem {
+    pub id: Option<String>,
+    pub encrypted_content: Option<String>,
+    pub summary_text: Option<String>,
+}
+
+/// Parse a `response.output_item.done` envelope into a [`ReasoningItem`] when
+/// its `item` is a reasoning item; `None` for any other event or item type.
+pub fn reasoning_item_from_output_item_done(envelope: &EventEnvelope) -> Option<ReasoningItem> {
+    if envelope.event_type != "response.output_item.done" {
+        return None;
+    }
+    let item = envelope.extra.get("item").and_then(Value::as_object)?;
+    if item.get("type").and_then(Value::as_str) != Some("reasoning") {
+        return None;
+    }
+    let non_empty = |v: Option<&Value>| {
+        v.and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    Some(ReasoningItem {
+        id: non_empty(item.get("id")),
+        encrypted_content: non_empty(item.get("encrypted_content")),
+        summary_text: extract_summary_text(item.get("summary")),
+    })
+}
