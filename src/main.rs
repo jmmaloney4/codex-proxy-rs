@@ -94,6 +94,14 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
+    // Stable, non-secret account alias for the subscription metrics' `account`
+    // label (ADR 008). Blank (unset env) → "unknown" so series are still
+    // well-formed; never derive this from a credential.
+    let account: Arc<str> = match config.account.trim() {
+        "" => Arc::from("unknown"),
+        alias => Arc::from(alias),
+    };
+
     let state = AppState {
         mode: config.mode,
         creds,
@@ -105,6 +113,8 @@ async fn main() -> anyhow::Result<()> {
         admin_api_key: config.admin_api_key.clone().map(Into::into),
         accounts,
         affinity,
+        metrics: Arc::new(codex_proxy_rs::metrics::Metrics::new()),
+        account,
     };
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", config.port)).await?;

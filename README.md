@@ -32,6 +32,7 @@ codex-proxy --creds-store fs --creds-path /data/auth.json
 | `POST /v1/responses` | admin key | Responses-API rewrite + SSE pass-through |
 | `GET /v1/models` | open | Embedded model metadata (dumped from Go `supportedModels()`) |
 | `GET /health` | open | `{"status": "ok"}` |
+| `GET /metrics` | open | Prometheus subscription-usage gauges (ADR 008) |
 | `POST /admin/credentials` | admin key | Push OAuth tokens (fs store) |
 | `GET /admin/credentials/status` | admin key | Token expiry status |
 

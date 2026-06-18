@@ -106,6 +106,14 @@ pub struct Config {
     /// Account ID for the env credential store (legacy name).
     #[arg(long, env = "CLAUDE_USER_ID", default_value = "")]
     pub claude_user_id: String,
+
+    /// Stable, non-secret account alias used as the `account` label on the
+    /// subscription-usage metrics and span attributes (ADR 008; garden
+    /// ADR 101). Each backend pod fronts one account, so this is set per pod
+    /// (e.g. the deployment slug). Never derive it from a credential or
+    /// client-supplied value. Unset → `"unknown"`.
+    #[arg(long = "account", env = "CODEX_PROXY_ACCOUNT", default_value = "")]
+    pub account: String,
 }
 
 /// Initialize logging and (optionally) OpenTelemetry OTLP trace export (ADR 005).

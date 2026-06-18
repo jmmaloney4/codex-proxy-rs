@@ -47,6 +47,12 @@ opentelemetry-otlp = { version = "0.32", default-features = false, features = ["
 opentelemetry-http = "0.32"
 tracing-opentelemetry = "0.33"
 
+# Prometheus metrics exporter for the `/metrics` endpoint (ADR 008; garden
+# ADR 101). default-features off drops protobuf/process/pushgateway — the text
+# exposition format (TextEncoder) is not feature-gated, and the pull-based
+# `/metrics` path must not depend on the OTLP exporter being configured.
+prometheus = { version = "0.14", default-features = false }
+
 [dev-dependencies]
 http = "1"  # HeaderMap in the inbound-propagation extraction test
 http-body-util = "0.1"
