@@ -40,7 +40,11 @@ pub async fn responses(State(state): State<AppState>, body: Bytes) -> Result<Res
 
     // Subscription-usage observability (ADR 008): read the quota headers off the
     // upstream response (success or 429) before relaying. Best-effort and
-    // header-name-scoped — never touches the body or the full header set.
+    // header-name-scoped — never touches the body or the full header set. This
+    // handler is mounted only in Backend mode (see the `server::router` route
+    // table; Router mode serves `/v1/responses` via `router::proxy`, which never
+    // emits), so the per-account `account` label is always correct — the router
+    // never mislabels its blended cross-account stream.
     state
         .metrics
         .observe_headers(&state.account, resp.headers());

@@ -98,13 +98,18 @@ impl Metrics {
 
     fn observe_window(&self, account: &str, kind: WindowKind, window: &Window) {
         let label = kind.label();
+        // minutes → seconds via saturating_mul: window_minutes is parsed from an
+        // upstream header, so a bogus huge value must cap at i64::MAX rather than
+        // overflow (a panic in debug builds, a wrap in release).
+        let window_seconds = window.window_minutes.map(|m| m.saturating_mul(60));
+
         self.used_percent
             .with_label_values(&[account, label])
             .set(window.used_percent);
-        if let Some(minutes) = window.window_minutes {
+        if let Some(seconds) = window_seconds {
             self.window_seconds
                 .with_label_values(&[account, label])
-                .set((minutes * 60) as f64);
+                .set(seconds as f64);
         }
         if let Some(reset_at) = window.reset_at {
             self.reset_timestamp_seconds
@@ -117,8 +122,8 @@ impl Metrics {
         // (`codex.account`), so the span carries only the per-request values.
         let span = tracing::Span::current();
         span.set_attribute(kind.used_percent_attr(), window.used_percent);
-        if let Some(minutes) = window.window_minutes {
-            span.set_attribute(kind.window_seconds_attr(), minutes * 60);
+        if let Some(seconds) = window_seconds {
+            span.set_attribute(kind.window_seconds_attr(), seconds);
         }
         if let Some(reset_at) = window.reset_at {
             span.set_attribute(kind.reset_attr(), reset_at);
@@ -223,6 +228,27 @@ mod tests {
         assert!(
             out.contains("codex_subscription_reset_timestamp_seconds{account=\"main\",window=\"primary\"} 1704069000"),
             "reset timestamp series missing:\n{out}"
+        );
+    }
+
+    #[test]
+    fn window_minutes_conversion_saturates_instead_of_overflowing() {
+        // A bogus huge window-minutes must not overflow i64 (panic in debug).
+        let metrics = Metrics::new();
+        metrics.observe_headers(
+            "main",
+            &headers(&[
+                ("x-codex-primary-used-percent", "1"),
+                ("x-codex-primary-window-minutes", &i64::MAX.to_string()),
+            ]),
+        );
+        let out = metrics.render();
+        assert!(
+            out.contains(&format!(
+                "codex_subscription_window_seconds{{account=\"main\",window=\"primary\"}} {}",
+                i64::MAX as f64
+            )),
+            "window_seconds should saturate at i64::MAX:\n{out}"
         );
     }
 
