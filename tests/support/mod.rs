@@ -163,6 +163,8 @@ pub fn test_state(upstream_url: &str, creds: Arc<dyn CredentialsFetcher>) -> App
         admin_api_key: Some(TEST_ADMIN_KEY.into()),
         accounts: None,
         affinity: None,
+        metrics: Arc::new(codex_proxy_rs::metrics::Metrics::new()),
+        account: Arc::from("test"),
     }
 }
 

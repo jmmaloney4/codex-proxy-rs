@@ -29,6 +29,8 @@ fn router_state(accounts: &str, affinity: Option<Arc<dyn AffinityStore>>) -> App
         admin_api_key: Some(TEST_ADMIN_KEY.into()),
         accounts: Some(Arc::new(AccountPool::parse(accounts).unwrap())),
         affinity,
+        metrics: Arc::new(codex_proxy_rs::metrics::Metrics::new()),
+        account: Arc::from("test-router"),
     }
 }
 

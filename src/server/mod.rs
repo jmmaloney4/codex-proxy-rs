@@ -17,6 +17,7 @@ use axum::routing::{get, post};
 use crate::affinity::AffinityStore;
 use crate::config::ProxyMode;
 use crate::credentials::CredentialsFetcher;
+use crate::metrics::Metrics;
 use crate::relay::RelayConfig;
 use crate::router::AccountPool;
 
@@ -36,6 +37,12 @@ pub struct AppState {
     /// Router mode only: conversation→account affinity store. `None` → the
     /// router routes statelessly (no pinning).
     pub affinity: Option<Arc<dyn AffinityStore>>,
+    /// Prometheus registry + subscription-usage gauges behind `/metrics`
+    /// (ADR 008). Always present; populated by the backend data-plane handlers.
+    pub metrics: Arc<Metrics>,
+    /// Stable, non-secret account alias for the subscription metrics' `account`
+    /// label (ADR 008). `"unknown"` when unconfigured.
+    pub account: Arc<str>,
 }
 
 /// Build the full router. Route table mirrors Go `setupRoutes`
@@ -64,6 +71,10 @@ pub fn router(state: AppState) -> Router {
         .merge(gated)
         .route("/v1/models", get(misc::models))
         .route("/health", get(misc::health))
+        // Open, like /health: Prometheus/Alloy scrape it without the admin key,
+        // and the series (account alias + quota percentages/timestamps) carry no
+        // secrets. Exposure is bounded to the cluster by the Service (ADR 008).
+        .route("/metrics", get(misc::metrics))
         .fallback(misc::not_found)
         .layer(axum::middleware::from_fn(middleware::log_requests))
         .with_state(state)

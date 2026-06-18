@@ -68,6 +68,13 @@ pub async fn chat_completions(
         .await
         .map_err(ApiError::Upstream)?;
 
+    // Subscription-usage observability (ADR 008): read the quota headers off the
+    // upstream response (success or 429) before relaying. Best-effort and
+    // header-name-scoped — never touches the body or the full header set.
+    state
+        .metrics
+        .observe_headers(&state.account, resp.headers());
+
     if stream {
         if resp.status() != reqwest::StatusCode::OK {
             return Ok(mirror_error_response(resp).await);
