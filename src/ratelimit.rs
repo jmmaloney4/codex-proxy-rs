@@ -19,7 +19,11 @@ use axum::http::HeaderMap;
 /// One rolling quota window (primary or secondary).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Window {
-    /// Fraction of the window consumed, 0–100.
+    /// Fraction of the window consumed, clamped to 0–100 (the documented
+    /// domain) so a bad upstream value can't poison gauges/alerts with an
+    /// impossible usage. Clamped, not dropped: the percentage is the anchor of
+    /// the whole window, and an over-cap reading still belongs at 100 rather
+    /// than erasing all visibility for that account/window.
     pub used_percent: f64,
     /// Rolling window duration, in minutes (as reported by the backend).
     pub window_minutes: Option<i64>,
@@ -58,7 +62,11 @@ impl Window {
     /// number — that header is the anchor; `window-minutes`/`reset-at` are
     /// optional refinements.
     fn from_headers(headers: &HeaderMap, kind: &str) -> Option<Self> {
-        let used_percent = parse_f64(headers, &format!("x-codex-{kind}-used-percent"))?;
+        // Clamp to the documented 0–100 domain (see the field doc): an
+        // out-of-range value is a backend bug, but clamping keeps the window
+        // visible (and alerting at 100) rather than dropping it entirely.
+        let used_percent =
+            parse_f64(headers, &format!("x-codex-{kind}-used-percent"))?.clamp(0.0, 100.0);
         Some(Self {
             used_percent,
             window_minutes: parse_i64(headers, &format!("x-codex-{kind}-window-minutes")),
@@ -173,5 +181,20 @@ mod tests {
             ("x-codex-primary-window-minutes", "soon"),
         ]));
         assert_eq!(limits.primary.map(|w| w.window_minutes), Some(None));
+    }
+
+    #[test]
+    fn used_percent_is_clamped_to_domain() {
+        // Out-of-range values are clamped, not dropped — the window stays
+        // visible and an over-cap reading still alerts at 100.
+        for (raw, expected) in [("150", 100.0), ("-5", 0.0), ("100", 100.0), ("0", 0.0)] {
+            let limits =
+                RateLimits::from_headers(&headers(&[("x-codex-primary-used-percent", raw)]));
+            assert_eq!(
+                limits.primary.map(|w| w.used_percent),
+                Some(expected),
+                "{raw} should clamp to {expected}"
+            );
+        }
     }
 }
