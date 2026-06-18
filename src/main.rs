@@ -3,9 +3,11 @@ use std::time::Duration;
 
 use clap::Parser;
 
-use codex_proxy_rs::config::{Config, CredsStore, init_tracing};
+use codex_proxy_rs::affinity::{AffinityStore, RedisAffinityStore};
+use codex_proxy_rs::config::{Config, CredsStore, ProxyMode, init_tracing};
 use codex_proxy_rs::credentials::{CredentialsFetcher, EnvCredentials, FsAuthFile, OAuthFetcher};
 use codex_proxy_rs::relay::RelayConfig;
+use codex_proxy_rs::router::AccountPool;
 use codex_proxy_rs::server::{AppState, router};
 use codex_proxy_rs::upstream::{UPSTREAM_URL, build_upstream_client};
 
@@ -17,41 +19,83 @@ async fn main() -> anyhow::Result<()> {
     let tracer_provider = init_tracing(&config.env);
 
     let http = build_upstream_client();
-    let creds: Arc<dyn CredentialsFetcher> = match config.creds_store {
-        CredsStore::Env => Arc::new(EnvCredentials::new(
-            config.anthropic_api_key.clone(),
-            config.claude_user_id.clone(),
-        )),
-        CredsStore::Fs => {
-            let path = match config.creds_path.clone() {
-                Some(path) => {
-                    if !path.is_absolute() {
-                        anyhow::bail!("--creds-path must be an absolute path");
+    // Router mode never calls the codex backend (the backend pods do), so it
+    // needs no credential store — and must not spawn the fs OAuth refresh
+    // loop. Use empty static creds there; only backend mode builds a real store.
+    let creds: Arc<dyn CredentialsFetcher> = match config.mode {
+        ProxyMode::Router => Arc::new(EnvCredentials::new(String::new(), String::new())),
+        ProxyMode::Backend => match config.creds_store {
+            CredsStore::Env => Arc::new(EnvCredentials::new(
+                config.anthropic_api_key.clone(),
+                config.claude_user_id.clone(),
+            )),
+            CredsStore::Fs => {
+                let path = match config.creds_path.clone() {
+                    Some(path) => {
+                        if !path.is_absolute() {
+                            anyhow::bail!("--creds-path must be an absolute path");
+                        }
+                        path
                     }
-                    path
-                }
-                None => default_creds_path()?,
-            };
-            tracing::info!(path = %path.display(), "using filesystem credential store");
-            let fetcher = Arc::new(OAuthFetcher::new(FsAuthFile::new(path), http.clone()));
-            fetcher.spawn_background_refresh();
-            fetcher
-        }
+                    None => default_creds_path()?,
+                };
+                tracing::info!(path = %path.display(), "using filesystem credential store");
+                let fetcher = Arc::new(OAuthFetcher::new(FsAuthFile::new(path), http.clone()));
+                fetcher.spawn_background_refresh();
+                fetcher
+            }
+        },
     };
 
-    // Startup validation, warn-only like Go.
-    match creds.get_credentials().await {
-        // Identifiers and token material stay out of the logs (tighter than
-        // Go, which logs the account id and a token preview).
-        Ok(c) => tracing::info!(
-            token_set = !c.token.is_empty(),
-            account_id_set = !c.account_id.is_empty(),
-            "credentials loaded",
-        ),
-        Err(err) => tracing::warn!(error = %err, "could not load credentials at startup"),
+    // Backend-mode startup validation, warn-only like Go. Router mode does not
+    // use credentials (the backend pods own those), so skip it there.
+    if config.mode == ProxyMode::Backend {
+        match creds.get_credentials().await {
+            // Identifiers and token material stay out of the logs (tighter than
+            // Go, which logs the account id and a token preview).
+            Ok(c) => tracing::info!(
+                token_set = !c.token.is_empty(),
+                account_id_set = !c.account_id.is_empty(),
+                "credentials loaded",
+            ),
+            Err(err) => tracing::warn!(error = %err, "could not load credentials at startup"),
+        }
     }
 
+    // Router mode: build the account pool and (best-effort) affinity store.
+    let (accounts, affinity): (Option<Arc<AccountPool>>, Option<Arc<dyn AffinityStore>>) =
+        match config.mode {
+            ProxyMode::Backend => (None, None),
+            ProxyMode::Router => {
+                let pool = AccountPool::parse(&config.codex_accounts)?;
+                tracing::info!(accounts = pool.len(), "router mode: account pool loaded");
+                let affinity: Option<Arc<dyn AffinityStore>> = match config.redis_url.as_deref() {
+                    Some(url) => {
+                        match RedisAffinityStore::connect(url, config.affinity_ttl_secs).await {
+                            Ok(store) => {
+                                tracing::info!("router mode: affinity store connected");
+                                Some(Arc::new(store))
+                            }
+                            // Best-effort (ADR 006 §5c): start anyway, statelessly.
+                            Err(err) => {
+                                tracing::warn!(error = %err, "router mode: affinity store unavailable; routing statelessly");
+                                None
+                            }
+                        }
+                    }
+                    None => {
+                        tracing::warn!(
+                            "router mode: no CODEX_PROXY_REDIS_URL; routing statelessly"
+                        );
+                        None
+                    }
+                };
+                (Some(Arc::new(pool)), affinity)
+            }
+        };
+
     let state = AppState {
+        mode: config.mode,
         creds,
         http,
         relay: RelayConfig {
@@ -59,6 +103,8 @@ async fn main() -> anyhow::Result<()> {
         },
         upstream_url: UPSTREAM_URL.into(),
         admin_api_key: config.admin_api_key.clone().map(Into::into),
+        accounts,
+        affinity,
     };
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", config.port)).await?;

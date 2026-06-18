@@ -153,6 +153,7 @@ impl CredentialsFetcher for StaticCredentials {
 /// AppState wired to a mock upstream with a short keepalive for tests.
 pub fn test_state(upstream_url: &str, creds: Arc<dyn CredentialsFetcher>) -> AppState {
     AppState {
+        mode: codex_proxy_rs::config::ProxyMode::Backend,
         creds,
         http: codex_proxy_rs::upstream::build_upstream_client(),
         relay: RelayConfig {
@@ -160,6 +161,8 @@ pub fn test_state(upstream_url: &str, creds: Arc<dyn CredentialsFetcher>) -> App
         },
         upstream_url: upstream_url.into(),
         admin_api_key: Some(TEST_ADMIN_KEY.into()),
+        accounts: None,
+        affinity: None,
     }
 }
 

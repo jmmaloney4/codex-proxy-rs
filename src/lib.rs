@@ -1,3 +1,4 @@
+pub mod affinity;
 pub mod buffered;
 pub mod config;
 pub mod conversation;
@@ -6,6 +7,7 @@ pub mod model;
 pub mod prompts;
 pub mod relay;
 pub mod request;
+pub mod router;
 pub mod server;
 pub mod transform;
 pub mod upstream;

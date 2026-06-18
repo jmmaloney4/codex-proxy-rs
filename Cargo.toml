@@ -23,6 +23,10 @@ clap = { version = "4", features = ["derive", "env"] }
 futures-util = { version = "0.3", default-features = false }
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "http2"] }
+# Router-mode conversation→account affinity store. Plaintext in-cluster Redis
+# (default-features off → no openssl); tokio + connection-manager match the
+# existing async/rustls stack. See ADR 007.
+redis = { version = "0.27", default-features = false, features = ["tokio-comp", "connection-manager"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

@@ -15,6 +15,17 @@ pub enum CredsStore {
     Fs,
 }
 
+/// What this process does (ADR 007).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ProxyMode {
+    /// Single-account backend: transform requests and call the ChatGPT/Codex
+    /// backend directly. The default; unchanged behavior.
+    Backend,
+    /// Front the single-account backend pods, pin each conversation to one
+    /// account, and reverse-proxy. Uses `CODEX_PROXY_ACCOUNTS` + optional Redis.
+    Router,
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "codex-proxy", version, about)]
 pub struct Config {
@@ -29,6 +40,38 @@ pub struct Config {
     /// Log mode: "development"/"dev"/"" → pretty console, else JSON.
     #[arg(long, env = "ENV", default_value = "development")]
     pub env: String,
+
+    /// Process mode: single-account backend (default) or affinity router.
+    #[arg(long = "mode", env = "CODEX_PROXY_MODE", value_enum, default_value_t = ProxyMode::Backend)]
+    pub mode: ProxyMode,
+
+    /// Router mode: comma-separated `slug=url` backend accounts, e.g.
+    /// `main=http://codex-proxy-main.codex-proxy.svc.cluster.local:9879,codex2=...`.
+    #[arg(
+        long = "codex-accounts",
+        env = "CODEX_PROXY_ACCOUNTS",
+        default_value = ""
+    )]
+    pub codex_accounts: String,
+
+    /// Router mode: Redis URL for the conversation→account affinity store.
+    /// Unset → the router runs without affinity (stateless round-robin).
+    #[arg(
+        long = "redis-url",
+        env = "CODEX_PROXY_REDIS_URL",
+        hide_env_values = true
+    )]
+    pub redis_url: Option<String>,
+
+    /// Router mode: affinity pin TTL in seconds (default 1 day). Must be ≥ 1 —
+    /// Redis `SET … EX 0` is a protocol error that would silently drop pins.
+    #[arg(
+        long = "affinity-ttl-secs",
+        env = "CODEX_PROXY_AFFINITY_TTL_SECS",
+        value_parser = clap::value_parser!(u64).range(1..),
+        default_value_t = 86_400
+    )]
+    pub affinity_ttl_secs: u64,
 
     /// Credential store mode.
     #[arg(long = "creds-store", env = "CODEX_PROXY_CREDS_STORE", value_enum, default_value_t = CredsStore::Env)]

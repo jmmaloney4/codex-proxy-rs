@@ -115,6 +115,20 @@ pub fn relay_response(resp: reqwest::Response, mode: RelayMode, relay: RelayConf
     response
 }
 
+/// Router mode (ADR 007): stream a sibling pod's response back verbatim. The
+/// pod already emits final OpenAI-format bytes (SSE *or* JSON), so there is no
+/// relay/rewrite — just copy status + sanitized headers and pipe the body. The
+/// body stream is lazy, so the pod's own keepalives/`[DONE]` flow through and a
+/// client disconnect drops the stream (cancelling the upstream request).
+pub fn proxy_response(resp: reqwest::Response) -> Response {
+    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let headers = sanitized_headers(resp.headers());
+    let mut response = Response::new(Body::from_stream(resp.bytes_stream()));
+    *response.status_mut() = status;
+    *response.headers_mut() = headers;
+    response
+}
+
 /// Error path of Go `writeResponse` (status != 200): buffer the body, log it,
 /// and mirror status + headers + body downstream.
 pub async fn mirror_error_response(resp: reqwest::Response) -> Response {
