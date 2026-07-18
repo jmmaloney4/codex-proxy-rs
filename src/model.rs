@@ -15,6 +15,9 @@ pub const GPT5_2_CODEX: &str = "gpt-5.2-codex";
 pub const GPT5_3_CODEX: &str = "gpt-5.3-codex";
 pub const GPT5_3_CODEX_SPARK: &str = "gpt-5.3-codex-spark";
 pub const GPT5_5: &str = "gpt-5.5";
+pub const GPT5_6_SOL: &str = "gpt-5.6-sol";
+pub const GPT5_6_TERRA: &str = "gpt-5.6-terra";
+pub const GPT5_6_LUNA: &str = "gpt-5.6-luna";
 pub const GPT5_CODEX_MINI: &str = "gpt-5-codex-mini";
 pub const GPT5_1_CODEX_MINI: &str = "gpt-5.1-codex-mini";
 pub const GPT5_4_MINI: &str = "gpt-5.4-mini";
@@ -27,7 +30,7 @@ fn model_allowed_efforts(model: &str) -> Option<&'static [&'static str]> {
     Some(match model {
         GPT5 => &["minimal", "low", "medium", "high"],
         GPT5_2 | GPT5_4 | GPT5_4_MINI | GPT5_2_CODEX | GPT5_3_CODEX | GPT5_3_CODEX_SPARK
-        | GPT5_5 => &["low", "medium", "high", "xhigh"],
+        | GPT5_5 | GPT5_6_SOL | GPT5_6_TERRA | GPT5_6_LUNA => &["low", "medium", "high", "xhigh"],
         GPT5_CODEX => &["minimal", "low", "medium", "high"],
         GPT5_1 | GPT5_1_CODEX => &["low", "medium", "high"],
         GPT5_1_CODEX_MAX => &["low", "medium", "high", "xhigh"],
@@ -38,9 +41,9 @@ fn model_allowed_efforts(model: &str) -> Option<&'static [&'static str]> {
 
 fn model_default_effort(model: &str) -> Option<&'static str> {
     Some(match model {
-        GPT5_1 | GPT5_1_CODEX | GPT5_1_CODEX_MAX => "low",
+        GPT5_1 | GPT5_1_CODEX | GPT5_1_CODEX_MAX | GPT5_6_SOL => "low",
         GPT5_2 | GPT5_4 | GPT5_4_MINI | GPT5_2_CODEX | GPT5_3_CODEX | GPT5_5 | GPT5_CODEX_MINI
-        | GPT5_1_CODEX_MINI => "medium",
+        | GPT5_1_CODEX_MINI | GPT5_6_TERRA | GPT5_6_LUNA => "medium",
         GPT5_3_CODEX_SPARK => "high",
         _ => return None,
     })
@@ -70,6 +73,27 @@ pub fn normalize_model(model: &str) -> &'static str {
     // Prefer explicit new model IDs first to keep mapping predictable.
     if lower == GPT5_5 {
         return GPT5_5;
+    }
+    // 5.6 introduced a three-tier lineup (sol / terra / luna). The bare
+    // `gpt-5.6` alias resolves to the sol tier — matches OpenAI's flagship
+    // alias for the family. Each tier must match explicitly; unrecognized
+    // 5.6 variants must NOT fall through to the generic gpt-5 fallback.
+    if lower == GPT5_6_SOL {
+        return GPT5_6_SOL;
+    }
+    if lower == GPT5_6_TERRA {
+        return GPT5_6_TERRA;
+    }
+    if lower == GPT5_6_LUNA {
+        return GPT5_6_LUNA;
+    }
+    if lower == "gpt-5.6" {
+        return GPT5_6_SOL;
+    }
+    // Any other 5.6 variant (future or unknown suffix) should stay within the
+    // 5.6 family rather than collapsing to the generic gpt-5 fallback.
+    if lower.starts_with("gpt-5.6-") {
+        return GPT5_6_SOL;
     }
     if lower.contains("gpt-5.2-codex") {
         return GPT5_2_CODEX;
@@ -305,6 +329,56 @@ mod tests {
         assert_eq!(normalize_model("gpt-5.5-xhigh"), GPT5_5);
     }
 
+    // ---- gpt-5.6 tier family ----
+
+    #[test]
+    fn normalize_model_gpt56_bare_resolves_to_sol() {
+        assert_eq!(normalize_model("gpt-5.6"), GPT5_6_SOL);
+    }
+
+    #[test]
+    fn normalize_model_gpt56_sol_base() {
+        assert_eq!(normalize_model("gpt-5.6-sol"), GPT5_6_SOL);
+    }
+
+    #[test]
+    fn normalize_model_gpt56_terra_base() {
+        assert_eq!(normalize_model("gpt-5.6-terra"), GPT5_6_TERRA);
+    }
+
+    #[test]
+    fn normalize_model_gpt56_luna_base() {
+        assert_eq!(normalize_model("gpt-5.6-luna"), GPT5_6_LUNA);
+    }
+
+    #[test]
+    fn normalize_model_gpt56_sol_with_effort_suffix() {
+        assert_eq!(normalize_model("gpt-5.6-sol-high"), GPT5_6_SOL);
+    }
+
+    #[test]
+    fn normalize_model_gpt56_terra_with_effort_suffix() {
+        assert_eq!(normalize_model("gpt-5.6-terra-xhigh"), GPT5_6_TERRA);
+    }
+
+    #[test]
+    fn normalize_model_gpt56_luna_with_effort_suffix() {
+        assert_eq!(normalize_model("gpt-5.6-luna-low"), GPT5_6_LUNA);
+    }
+
+    #[test]
+    fn normalize_model_gpt56_sol_uppercase() {
+        assert_eq!(normalize_model("GPT-5.6-SOL"), GPT5_6_SOL);
+    }
+
+    #[test]
+    fn normalize_model_gpt56_unknown_tier_does_not_collapse_to_gpt5() {
+        // An unrecognized 5.6 variant must not silently fall back to gpt-5.
+        // "gpt-5.6-pro" is not a real tier; we assert it resolves to the bare
+        // family alias (gpt-5.6) → sol, NOT to gpt-5.
+        assert_eq!(normalize_model("gpt-5.6-pro"), GPT5_6_SOL);
+    }
+
     #[test]
     fn normalize_model_gpt51_with_suffix() {
         assert_eq!(normalize_model("gpt-5.1-high"), GPT5_1);
@@ -467,6 +541,48 @@ mod tests {
     #[test]
     fn clamp_gpt55_default() {
         assert_eq!(clamp_reasoning_effort_for_model("", GPT5_5), "medium");
+    }
+
+    #[test]
+    fn clamp_gpt56_sol_allows_xhigh() {
+        assert_eq!(
+            clamp_reasoning_effort_for_model("xhigh", GPT5_6_SOL),
+            "xhigh"
+        );
+    }
+
+    #[test]
+    fn clamp_gpt56_sol_default_when_empty() {
+        assert_eq!(clamp_reasoning_effort_for_model("", GPT5_6_SOL), "low");
+    }
+
+    #[test]
+    fn clamp_gpt56_sol_disallows_minimal() {
+        assert_eq!(
+            clamp_reasoning_effort_for_model("minimal", GPT5_6_SOL),
+            "low"
+        );
+    }
+
+    #[test]
+    fn clamp_gpt56_terra_default_when_empty() {
+        assert_eq!(clamp_reasoning_effort_for_model("", GPT5_6_TERRA), "medium");
+    }
+
+    #[test]
+    fn clamp_gpt56_terra_clamps_invalid_to_default() {
+        // "aggressive" is not a valid effort; after normalize it's "" but clamp
+        // is called with the already-normalized value, so an out-of-set effort
+        // falls back to the model default.
+        assert_eq!(
+            clamp_reasoning_effort_for_model("ultra", GPT5_6_TERRA),
+            "medium"
+        );
+    }
+
+    #[test]
+    fn clamp_gpt56_luna_default_when_empty() {
+        assert_eq!(clamp_reasoning_effort_for_model("", GPT5_6_LUNA), "medium");
     }
 
     #[test]

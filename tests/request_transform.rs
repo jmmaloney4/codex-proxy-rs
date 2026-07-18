@@ -161,6 +161,22 @@ fn build_codex_request_sets_static_fields_and_prepends_greeting() {
 }
 
 #[test]
+fn build_codex_request_gpt56_bare_alias_resolves_to_sol() {
+    let request = json!({
+        "model": "gpt-5.6",
+        "messages": [
+            { "role": "user", "content": "Ship it" },
+        ],
+    });
+
+    let body = build_codex_request_body(&request);
+
+    assert_eq!(body["model"], json!("gpt-5.6-sol"));
+    // Bare 5.6 aliases to sol, which defaults to low reasoning.
+    assert_eq!(body["reasoning"]["effort"], json!("low"));
+}
+
+#[test]
 fn build_codex_request_maps_tools_and_no_tools_is_null() {
     let with_tools = json!({
         "model": "gpt-5",
