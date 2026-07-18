@@ -2568,6 +2568,132 @@
       ],
       "vendor": "OpenAI",
       "version": "gpt-5.1-codex-mini"
+    },
+    {
+      "capabilities": {
+        "family": "gpt-5.6",
+        "limits": {
+          "max_context_window_tokens": 1050000,
+          "max_output_tokens": 128000,
+          "max_prompt_tokens": 922000,
+          "vision": {
+            "max_prompt_image_size": 3145728,
+            "max_prompt_images": 1,
+            "supported_media_types": [
+              "image/jpeg",
+              "image/png",
+              "image/webp",
+              "image/gif"
+            ]
+          }
+        },
+        "object": "model_capabilities",
+        "supports": {
+          "parallel_tool_calls": true,
+          "streaming": true,
+          "structured_outputs": true,
+          "tool_calls": true,
+          "vision": true
+        },
+        "tokenizer": "o200k_base",
+        "type": "chat"
+      },
+      "id": "gpt-5.6-sol",
+      "model_picker_category": "versatile",
+      "model_picker_enabled": true,
+      "name": "GPT-5.6 sol",
+      "object": "model",
+      "policy": {
+        "state": "enabled",
+        "terms": "Enable access to GPT-5.6 from OpenAI. [Learn more about how GitHub Copilot serves GPT-5.6](https://gh.io/copilot-openai)."
+      },
+      "preview": false,
+      "vendor": "OpenAI",
+      "version": "gpt-5.6-sol"
+    },
+    {
+      "capabilities": {
+        "family": "gpt-5.6",
+        "limits": {
+          "max_context_window_tokens": 1050000,
+          "max_output_tokens": 128000,
+          "max_prompt_tokens": 922000,
+          "vision": {
+            "max_prompt_image_size": 3145728,
+            "max_prompt_images": 1,
+            "supported_media_types": [
+              "image/jpeg",
+              "image/png",
+              "image/webp",
+              "image/gif"
+            ]
+          }
+        },
+        "object": "model_capabilities",
+        "supports": {
+          "parallel_tool_calls": true,
+          "streaming": true,
+          "structured_outputs": true,
+          "tool_calls": true,
+          "vision": true
+        },
+        "tokenizer": "o200k_base",
+        "type": "chat"
+      },
+      "id": "gpt-5.6-terra",
+      "model_picker_category": "versatile",
+      "model_picker_enabled": true,
+      "name": "GPT-5.6 terra",
+      "object": "model",
+      "policy": {
+        "state": "enabled",
+        "terms": "Enable access to GPT-5.6 from OpenAI. [Learn more about how GitHub Copilot serves GPT-5.6](https://gh.io/copilot-openai)."
+      },
+      "preview": false,
+      "vendor": "OpenAI",
+      "version": "gpt-5.6-terra"
+    },
+    {
+      "capabilities": {
+        "family": "gpt-5.6",
+        "limits": {
+          "max_context_window_tokens": 1050000,
+          "max_output_tokens": 128000,
+          "max_prompt_tokens": 922000,
+          "vision": {
+            "max_prompt_image_size": 3145728,
+            "max_prompt_images": 1,
+            "supported_media_types": [
+              "image/jpeg",
+              "image/png",
+              "image/webp",
+              "image/gif"
+            ]
+          }
+        },
+        "object": "model_capabilities",
+        "supports": {
+          "parallel_tool_calls": true,
+          "streaming": true,
+          "structured_outputs": true,
+          "tool_calls": true,
+          "vision": true
+        },
+        "tokenizer": "o200k_base",
+        "type": "chat"
+      },
+      "id": "gpt-5.6-luna",
+      "model_picker_category": "versatile",
+      "model_picker_enabled": true,
+      "name": "GPT-5.6 luna",
+      "object": "model",
+      "policy": {
+        "state": "enabled",
+        "terms": "Enable access to GPT-5.6 from OpenAI. [Learn more about how GitHub Copilot serves GPT-5.6](https://gh.io/copilot-openai)."
+      },
+      "preview": false,
+      "vendor": "OpenAI",
+      "version": "gpt-5.6-luna"
     }
   ]
 }
