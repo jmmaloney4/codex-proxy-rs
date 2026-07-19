@@ -34,9 +34,15 @@ pub async fn responses(State(state): State<AppState>, body: Bytes) -> Result<Res
             .map_err(|_| ApiError::Internal("Failed to process request"))?,
     );
 
-    let resp = send_with_retry(&state.http, &state.creds, &state.upstream_url, out)
-        .await
-        .map_err(ApiError::Upstream)?;
+    let resp = send_with_retry(
+        &state.http,
+        &state.creds,
+        &state.upstream_url,
+        out,
+        &state.codex_cli_version,
+    )
+    .await
+    .map_err(ApiError::Upstream)?;
 
     // Subscription-usage observability (ADR 008): read the quota headers off the
     // upstream response (success or 429) before relaying. Best-effort and

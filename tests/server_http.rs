@@ -5,6 +5,7 @@ use std::sync::Arc;
 use axum::body::{Body, Bytes};
 use axum::http::{Request, StatusCode, header};
 use codex_proxy_rs::server::router;
+use codex_proxy_rs::upstream::DEFAULT_CODEX_CLI_VERSION;
 use futures_util::StreamExt;
 use http_body_util::BodyExt;
 use pretty_assertions::assert_eq;
@@ -509,13 +510,16 @@ async fn upstream_headers_match_go_contract() {
     let headers = upstream.headers.lock().await;
     let h = &headers[0];
     assert_eq!(h.get("authorization").unwrap(), "Bearer tok123");
-    assert_eq!(h.get("version").unwrap(), "0.125.0");
+    assert_eq!(h.get("version").unwrap(), DEFAULT_CODEX_CLI_VERSION);
     assert_eq!(h.get("openai-beta").unwrap(), "responses=experimental");
     assert_eq!(h.get("chatgpt-account-id").unwrap(), "acct-1");
     assert_eq!(h.get("originator").unwrap(), "codex_cli_rs");
     assert_eq!(
         h.get("user-agent").unwrap(),
-        "codex_cli_rs/0.125.0 (Mac OS 26.3.0; arm64) Apple_Terminal/466"
+        &format!(
+            "codex_cli_rs/{version} (Mac OS 26.3.0; arm64) Apple_Terminal/466",
+            version = DEFAULT_CODEX_CLI_VERSION
+        )
     );
     assert_eq!(
         h.get("x-codex-beta-features").unwrap(),
@@ -533,6 +537,33 @@ async fn upstream_headers_match_go_contract() {
         "turn: {turn}"
     );
     assert_eq!(turn["sandbox"], "none");
+}
+
+#[tokio::test]
+async fn upstream_headers_honor_runtime_codex_cli_version_override() {
+    let upstream = MockUpstream::start(vec![MockResponse::Sse(codex_sse_fixture())]).await;
+    let mut state = test_state(
+        &upstream.url,
+        Arc::new(StaticCredentials::new("tok123", "acct-1")),
+    );
+    state.codex_cli_version = Arc::from("9.9.9-test");
+    let app = router(state);
+
+    app.oneshot(chat_request(json!({
+        "model": "gpt-5",
+        "stream": true,
+        "messages": [{"role": "user", "content": "hi"}],
+    })))
+    .await
+    .unwrap();
+
+    let headers = upstream.headers.lock().await;
+    let h = &headers[0];
+    assert_eq!(h.get("version").unwrap(), "9.9.9-test");
+    assert_eq!(
+        h.get("user-agent").unwrap(),
+        "codex_cli_rs/9.9.9-test (Mac OS 26.3.0; arm64) Apple_Terminal/466"
+    );
 }
 
 // ---- admin credentials on a basic store ----------------------------------------

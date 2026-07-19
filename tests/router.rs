@@ -26,6 +26,7 @@ fn router_state(accounts: &str, affinity: Option<Arc<dyn AffinityStore>>) -> App
             keepalive_interval: std::time::Duration::from_millis(50),
         },
         upstream_url: "http://unused".into(),
+        codex_cli_version: codex_proxy_rs::upstream::DEFAULT_CODEX_CLI_VERSION.into(),
         admin_api_key: Some(TEST_ADMIN_KEY.into()),
         accounts: Some(Arc::new(AccountPool::parse(accounts).unwrap())),
         affinity,
