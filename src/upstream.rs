@@ -14,6 +14,17 @@ use crate::credentials::{CredentialsError, CredentialsFetcher};
 /// The one backend endpoint both proxy routes forward to.
 pub const UPSTREAM_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 
+/// Default spoofed Codex CLI client version. ChatGPT's backend gates newer
+/// models (e.g. `gpt-5.6-sol`) behind a minimum client version, returning
+/// `400: The 'X' model requires a newer version of Codex` when the `version`
+/// header is too old.
+///
+/// This default tracks `numtide/llm-agents.nix`'s `packages/codex` version
+/// (currently 0.144.6), which mirrors the latest `openai/codex` release, but
+/// operators can override it at runtime via `CODEX_PROXY_CODEX_CLI_VERSION` /
+/// `--codex-cli-version`.
+pub const DEFAULT_CODEX_CLI_VERSION: &str = "0.144.6";
+
 #[derive(Debug, thiserror::Error)]
 pub enum UpstreamError {
     #[error("failed to get credentials: {0}")]
@@ -63,6 +74,7 @@ async fn send_codex_request(
     body: bytes::Bytes,
     token: &str,
     account_id: &str,
+    codex_cli_version: &str,
 ) -> Result<reqwest::Response, reqwest::Error> {
     let bare = bare_token(token);
     let turn_metadata = format!(
@@ -79,7 +91,7 @@ async fn send_codex_request(
     client
         .post(url)
         .header("authorization", format!("Bearer {bare}"))
-        .header("version", "0.125.0")
+        .header("version", codex_cli_version)
         .header("openai-beta", "responses=experimental")
         .header("session_id", uuid::Uuid::new_v4().to_string())
         .header("accept", "text/event-stream")
@@ -88,7 +100,10 @@ async fn send_codex_request(
         .header("originator", "codex_cli_rs")
         .header(
             "user-agent",
-            "codex_cli_rs/0.125.0 (Mac OS 26.3.0; arm64) Apple_Terminal/466",
+            format!(
+                "codex_cli_rs/{version} (Mac OS 26.3.0; arm64) Apple_Terminal/466",
+                version = codex_cli_version
+            ),
         )
         .header(
             "x-codex-beta-features",
@@ -108,6 +123,7 @@ pub async fn send_with_retry(
     creds: &Arc<dyn CredentialsFetcher>,
     url: &str,
     body: bytes::Bytes,
+    codex_cli_version: &str,
 ) -> Result<reqwest::Response, UpstreamError> {
     let initial = creds
         .get_credentials()
@@ -120,6 +136,7 @@ pub async fn send_with_retry(
         body.clone(),
         &initial.token,
         &initial.account_id,
+        codex_cli_version,
     )
     .await?;
     if resp.status() != reqwest::StatusCode::UNAUTHORIZED {
@@ -138,8 +155,15 @@ pub async fn send_with_retry(
         .get_credentials()
         .await
         .map_err(UpstreamError::Credentials)?;
-    let resp =
-        send_codex_request(client, url, body, &refreshed.token, &refreshed.account_id).await?;
+    let resp = send_codex_request(
+        client,
+        url,
+        body,
+        &refreshed.token,
+        &refreshed.account_id,
+        codex_cli_version,
+    )
+    .await?;
 
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
         tracing::error!("still received 401 after token refresh, giving up");

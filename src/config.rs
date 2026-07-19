@@ -7,6 +7,28 @@
 
 use clap::{Parser, ValueEnum};
 
+use crate::upstream::DEFAULT_CODEX_CLI_VERSION;
+
+/// Reject values that would produce malformed upstream HTTP headers.
+///
+/// The Codex CLI version is forwarded verbatim into the upstream `version` and
+/// `user-agent` headers. An empty or control-character-bearing value would not
+/// be a parse error on its own — it would instead fail every upstream request
+/// at runtime with an opaque "invalid header" error. This parser surfaces that
+/// as a clear startup failure, not a per-request surprise.
+fn parse_codex_cli_version(raw: &str) -> Result<String, String> {
+    if raw.chars().any(char::is_control) {
+        return Err(format!(
+            "codex-cli-version contains an invalid header character: {raw:?}"
+        ));
+    }
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("codex-cli-version must not be empty".into());
+    }
+    Ok(trimmed.to_owned())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum CredsStore {
     /// Static token from ANTHROPIC_API_KEY / CLAUDE_USER_ID.
@@ -93,6 +115,17 @@ pub struct Config {
         default_value_t = 15
     )]
     pub keepalive_secs: u64,
+
+    /// Codex CLI version to spoof in the upstream `version` and `user-agent`
+    /// headers. ChatGPT's backend gates newer models behind a minimum client
+    /// version, so this is operator-tunable to stay current without a rebuild.
+    #[arg(
+        long = "codex-cli-version",
+        env = "CODEX_PROXY_CODEX_CLI_VERSION",
+        default_value = DEFAULT_CODEX_CLI_VERSION,
+        value_parser = parse_codex_cli_version,
+    )]
+    pub codex_cli_version: String,
 
     /// Static bearer token for the env credential store (legacy name).
     #[arg(
@@ -292,7 +325,7 @@ fn otlp_provider(env: &str) -> Option<opentelemetry_sdk::trace::SdkTracerProvide
 
 #[cfg(test)]
 mod tests {
-    use super::{attrs_declare_service_name, export_enabled};
+    use super::{attrs_declare_service_name, export_enabled, parse_codex_cli_version};
 
     /// The gate behind "feature-dark until configured": export turns on only
     /// when one of the standard OTLP endpoint vars holds a non-blank value —
@@ -360,5 +393,21 @@ mod tests {
             "extracted trace_id must match the inbound traceparent",
         );
         assert!(extracted.is_remote(), "parent must be flagged remote");
+    }
+
+    #[test]
+    fn codex_cli_version_parser_accepts_normal_values() {
+        assert_eq!(parse_codex_cli_version("0.144.6").unwrap(), "0.144.6");
+        assert_eq!(
+            parse_codex_cli_version(" 0.145.0-beta.1 ").unwrap(),
+            "0.145.0-beta.1"
+        );
+    }
+
+    #[test]
+    fn codex_cli_version_parser_rejects_blank_and_control_chars() {
+        assert!(parse_codex_cli_version("   ").is_err());
+        assert!(parse_codex_cli_version("0.144.6\n").is_err());
+        assert!(parse_codex_cli_version("0.144.6\t").is_err());
     }
 }

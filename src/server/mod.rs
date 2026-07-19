@@ -30,6 +30,9 @@ pub struct AppState {
     pub relay: RelayConfig,
     /// `upstream::UPSTREAM_URL` in production; a mock server URL in tests.
     pub upstream_url: Arc<str>,
+    /// Spoofed Codex CLI client version, sent as the upstream `version` and
+    /// `user-agent`. Runtime-configurable via `CODEX_PROXY_CODEX_CLI_VERSION`.
+    pub codex_cli_version: Arc<str>,
     /// Snapshot of `ADMIN_API_KEY`; `None` → 500 on gated routes (Go parity).
     pub admin_api_key: Option<Arc<str>>,
     /// Router mode only: the backend accounts to route across.

@@ -160,6 +160,7 @@ pub fn test_state(upstream_url: &str, creds: Arc<dyn CredentialsFetcher>) -> App
             keepalive_interval: std::time::Duration::from_millis(50),
         },
         upstream_url: upstream_url.into(),
+        codex_cli_version: codex_proxy_rs::upstream::DEFAULT_CODEX_CLI_VERSION.into(),
         admin_api_key: Some(TEST_ADMIN_KEY.into()),
         accounts: None,
         affinity: None,

@@ -55,9 +55,11 @@ Upstream bytes flow in via
 reqwest with **rustls** (no system TLS — keeps the nix-built image free of
 openssl), `http2` for ALPN, 10s connect timeout, and **no total/read
 timeout** — Go parity, required for long SSE streams. Proxy-from-env is
-reqwest's default. The exact Go header set (version 0.125.0, originator,
-user-agent, beta features, per-request UUIDv4 `session_id` and turn
-metadata) is reproduced verbatim; 401 triggers one refresh+retry.
+reqwest's default. The exact Go header set (version/originator/user-agent,
+beta features, per-request UUIDv4 `session_id` and turn metadata) is
+reproduced verbatim, with the Codex CLI version now defaulting to the latest
+known upstream (`DEFAULT_CODEX_CLI_VERSION`) but overrideable at runtime via
+`CODEX_PROXY_CODEX_CLI_VERSION`; 401 triggers one refresh+retry.
 
 ### 4. Credentials: Kubernetes-shaped, not Go-parity (owner decision)
 

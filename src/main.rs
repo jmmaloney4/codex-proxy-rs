@@ -110,6 +110,7 @@ async fn main() -> anyhow::Result<()> {
             keepalive_interval: Duration::from_secs(config.keepalive_secs),
         },
         upstream_url: UPSTREAM_URL.into(),
+        codex_cli_version: config.codex_cli_version.clone().into(),
         admin_api_key: config.admin_api_key.clone().map(Into::into),
         accounts,
         affinity,
