@@ -434,6 +434,99 @@ async fn responses_non_streaming_json_mirrored_verbatim() {
 }
 
 #[tokio::test]
+async fn responses_without_stream_flag_returns_aggregated_object() {
+    // Regression test for the LiteLLM chat->responses bridge: it omits `stream`
+    // whenever the inbound chat request was non-streaming. Previously that body
+    // went upstream as-is and the Codex backend answered
+    // `{"detail":"Stream must be set to true"}`, which was mirrored back as a
+    // 400. Now the proxy streams upstream and collapses the SSE for the caller.
+    let sse = concat!(
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\",\"status\":\"in_progress\"}}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"object\":\"response\",\"status\":\"completed\"}}\n\n",
+    );
+    let upstream = MockUpstream::start(vec![MockResponse::Sse(sse.to_string())]).await;
+    let app = router(test_state(
+        &upstream.url,
+        Arc::new(StaticCredentials::new("tok", "acct")),
+    ));
+
+    let resp = app
+        .oneshot(authed(
+            Request::post("/v1/responses")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"model": "gpt-5.1-codex", "input": []}).to_string(),
+                ))
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CONTENT_TYPE).unwrap(),
+        "application/json"
+    );
+    assert_eq!(
+        body_json(resp.into_body()).await,
+        json!({"id": "r1", "object": "response", "status": "completed"}),
+    );
+}
+
+#[tokio::test]
+async fn responses_explicit_stream_false_returns_aggregated_object() {
+    // `"stream": false` is a valid Responses API request; it must not be
+    // treated as a streaming request just because we stream upstream.
+    let sse = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r2\"}}\n\n";
+    let upstream = MockUpstream::start(vec![MockResponse::Sse(sse.to_string())]).await;
+    let app = router(test_state(
+        &upstream.url,
+        Arc::new(StaticCredentials::new("tok", "acct")),
+    ));
+
+    let resp = app
+        .oneshot(authed(
+            Request::post("/v1/responses")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"model": "gpt-5.1-codex", "input": [], "stream": false}).to_string(),
+                ))
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp.into_body()).await, json!({"id": "r2"}));
+}
+
+#[tokio::test]
+async fn responses_truncated_stream_fails_closed() {
+    // No terminal event: better a 500 than a plausible-looking partial object.
+    let sse = "data: {\"type\":\"response.created\",\"response\":{\"id\":\"r3\"}}\n\n";
+    let upstream = MockUpstream::start(vec![MockResponse::Sse(sse.to_string())]).await;
+    let app = router(test_state(
+        &upstream.url,
+        Arc::new(StaticCredentials::new("tok", "acct")),
+    ));
+
+    let resp = app
+        .oneshot(authed(
+            Request::post("/v1/responses")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"model": "gpt-5.1-codex", "input": []}).to_string(),
+                ))
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
 async fn responses_error_mirrored() {
     let upstream = MockUpstream::start(vec![MockResponse::Status(
         400,

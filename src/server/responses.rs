@@ -2,14 +2,16 @@
 
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::response::Response;
+use axum::response::{IntoResponse, Json, Response};
 use serde_json::Value;
 
 use super::AppState;
 use super::error::ApiError;
 use super::stream::{
     RelayMode, is_event_stream, mirror_error_response, mirror_success_response, relay_response,
+    response_reader,
 };
+use crate::buffered::buffer_responses_response;
 use crate::request::{
     resolve_reasoning_effort, resolve_request_model, transform_responses_request_body,
 };
@@ -19,6 +21,15 @@ pub async fn responses(State(state): State<AppState>, body: Bytes) -> Result<Res
     let mut request: Value = serde_json::from_slice(&body)
         .map_err(|_| ApiError::BadRequest("Failed to parse request body".to_string()))?;
 
+    // Read the caller's intent *before* the transform, which unconditionally
+    // sets `stream: true` upstream (the Codex backend accepts nothing else).
+    // Like `/v1/chat/completions`, only an explicit `"stream": true` selects a
+    // streamed downstream response; anything else gets the aggregated object.
+    let client_wants_stream = request
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
     let requested_model = resolve_request_model(&request);
     let requested_effort = resolve_reasoning_effort(&request);
     let (normalized_model, clamped_effort) =
@@ -26,6 +37,7 @@ pub async fn responses(State(state): State<AppState>, body: Bytes) -> Result<Res
     tracing::info!(
         model = %normalized_model,
         effort = %clamped_effort,
+        stream = client_wants_stream,
         "responses request",
     );
 
@@ -60,15 +72,30 @@ pub async fn responses(State(state): State<AppState>, body: Bytes) -> Result<Res
         return Ok(mirror_error_response(resp).await);
     }
 
-    // Only SSE responses go through the pass-through relay (Go gates its SSE
-    // headers on the same media-type check). Non-streaming JSON success
-    // responses are mirrored verbatim.
-    if is_event_stream(&resp) {
+    // Only SSE responses go through the relay (Go gates its SSE headers on the
+    // same media-type check). A non-SSE success is mirrored verbatim: the
+    // upstream ignored our forced `stream: true` and already answered with the
+    // final object, which is exactly what either caller wants.
+    if !is_event_stream(&resp) {
+        return Ok(mirror_success_response(resp).await);
+    }
+
+    if client_wants_stream {
         return Ok(relay_response(
             resp,
             RelayMode::PassThrough,
             state.relay.clone(),
         ));
     }
-    Ok(mirror_success_response(resp).await)
+
+    // The caller wanted a plain response but we had to ask upstream for a
+    // stream, so collapse the SSE back into the single response object the
+    // Responses API defines for a non-streaming call.
+    let response = buffer_responses_response(response_reader(resp))
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "failed to buffer responses stream");
+            ApiError::Internal("Failed to process streaming response")
+        })?;
+    Ok(Json(response).into_response())
 }

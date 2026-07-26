@@ -108,6 +108,40 @@ fn responses_clamps_effort_per_model() {
     assert_eq!(b4["reasoning"]["effort"], json!("low"));
 }
 
+#[test]
+fn responses_forces_stream_true_upstream() {
+    // The Codex backend rejects a Responses call without `stream: true`
+    // (`{"detail":"Stream must be set to true"}`), so the transform must set it
+    // regardless of what the caller asked for. The handler decides separately
+    // whether to relay the SSE or aggregate it.
+    let base = || {
+        json!({
+            "input": [{
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "Hello" }],
+            }],
+        })
+    };
+
+    // Caller omitted `stream` entirely — the LiteLLM chat->responses bridge
+    // shape that produced the 400s.
+    let mut absent = base();
+    transform_responses_request_body(&mut absent, "gpt-5", "");
+    assert_eq!(absent["stream"], json!(true));
+
+    // Caller explicitly asked for a non-streaming response.
+    let mut explicit_false = base();
+    explicit_false["stream"] = json!(false);
+    transform_responses_request_body(&mut explicit_false, "gpt-5", "");
+    assert_eq!(explicit_false["stream"], json!(true));
+
+    // Caller already wanted streaming — unchanged.
+    let mut explicit_true = base();
+    explicit_true["stream"] = json!(true);
+    transform_responses_request_body(&mut explicit_true, "gpt-5", "");
+    assert_eq!(explicit_true["stream"], json!(true));
+}
+
 // ---- build_codex_request_body ------------------------------------------
 
 #[test]
