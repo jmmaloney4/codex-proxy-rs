@@ -226,6 +226,14 @@ async fn responses_error_event_is_retained_for_diagnostics() {
     let err = buffer_responses_response(input.as_slice())
         .await
         .expect_err("error-only stream must error");
+    // The handler logs this failure through `Display`, so the retained payload
+    // is only useful if it survives into the message an operator actually sees.
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("upstream exploded"),
+        "upstream diagnostic missing from the logged message: {rendered}",
+    );
+
     let BufferError::MissingTerminalEvent {
         upstream_error: Some(payload),
     } = err

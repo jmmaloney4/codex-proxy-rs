@@ -30,7 +30,13 @@ pub enum BufferError {
     Read(#[from] std::io::Error),
     #[error("failed to transform SSE event: {0}")]
     Transform(#[from] TransformError),
-    #[error("responses stream ended without a terminal response event")]
+    // The captured `error` event is the only diagnostic a truncated stream
+    // leaves behind, and the handler logs this through `Display` — so
+    // interpolate it here instead of leaving the field visible only to tests.
+    #[error("responses stream ended without a terminal response event{}",
+        .upstream_error.as_ref()
+            .map(|err| format!(" (last upstream error: {err})"))
+            .unwrap_or_default())]
     MissingTerminalEvent { upstream_error: Option<Value> },
 }
 
