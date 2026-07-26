@@ -31,13 +31,48 @@ pub enum BufferError {
     #[error("failed to transform SSE event: {0}")]
     Transform(#[from] TransformError),
     // The captured `error` event is the only diagnostic a truncated stream
-    // leaves behind, and the handler logs this through `Display` — so
-    // interpolate it here instead of leaving the field visible only to tests.
+    // leaves behind, and the handler logs this through `Display` — so surface
+    // it here instead of leaving the field visible only to tests. Only the
+    // `code`/`message` pair is rendered; see `summarize_upstream_error`.
     #[error("responses stream ended without a terminal response event{}",
         .upstream_error.as_ref()
-            .map(|err| format!(" (last upstream error: {err})"))
+            .map(summarize_upstream_error)
             .unwrap_or_default())]
     MissingTerminalEvent { upstream_error: Option<Value> },
+}
+
+/// Longest upstream `message` we will copy into a log line.
+const UPSTREAM_ERROR_MESSAGE_LIMIT: usize = 200;
+
+/// Render an upstream `error` event down to its `code`/`message` pair for
+/// logging.
+///
+/// The payload is backend-controlled JSON, and the ChatGPT Codex backend does
+/// not always use the OpenAI error shape (the bug that motivated forcing
+/// `stream: true` surfaced as `{"detail":"Stream must be set to true"}`). Some
+/// validation errors echo the offending request fragment back in `message`, so
+/// serializing the whole object would put arbitrary — potentially
+/// prompt-derived — content into operator logs, and unbounded content at that.
+///
+/// Extracting the two diagnostic fields keeps what an operator needs to act on
+/// while bounding both the shape and the size of what gets persisted. A payload
+/// carrying neither field renders as `unparseable` rather than being dumped.
+fn summarize_upstream_error(payload: &Value) -> String {
+    let code = payload.get("code").and_then(Value::as_str);
+    let message = payload.get("message").and_then(Value::as_str).map(|msg| {
+        match msg.char_indices().nth(UPSTREAM_ERROR_MESSAGE_LIMIT) {
+            Some((cutoff, _)) => format!("{}…", &msg[..cutoff]),
+            None => msg.to_string(),
+        }
+    });
+
+    let summary = match (code, message) {
+        (Some(code), Some(message)) => format!("{code}: {message}"),
+        (Some(code), None) => code.to_string(),
+        (None, Some(message)) => message,
+        (None, None) => "unparseable".to_string(),
+    };
+    format!(" (last upstream error: {summary})")
 }
 
 #[derive(Debug, Default, Deserialize)]

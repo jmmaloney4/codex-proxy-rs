@@ -230,7 +230,7 @@ async fn responses_error_event_is_retained_for_diagnostics() {
     // is only useful if it survives into the message an operator actually sees.
     let rendered = err.to_string();
     assert!(
-        rendered.contains("upstream exploded"),
+        rendered.contains("server_error: upstream exploded"),
         "upstream diagnostic missing from the logged message: {rendered}",
     );
 
@@ -241,4 +241,43 @@ async fn responses_error_event_is_retained_for_diagnostics() {
         panic!("expected the upstream error to be carried on the failure");
     };
     assert_eq!(payload["message"], "upstream exploded");
+}
+
+#[tokio::test]
+async fn responses_error_summary_omits_unknown_payload_fields() {
+    // The payload is backend-controlled and its `message` may echo request
+    // content, so only `code`/`message` are rendered — never the whole object.
+    let input = sse(&[concat!(
+        r#"{"type":"error","code":"server_error","message":"boom","#,
+        r#""prompt":"SECRET USER PROMPT","input":["SECRET TOOL ARGS"]}"#,
+    )]);
+    let err = buffer_responses_response(input.as_slice())
+        .await
+        .expect_err("error-only stream must error");
+
+    let rendered = err.to_string();
+    assert!(rendered.contains("server_error: boom"), "got: {rendered}");
+    assert!(
+        !rendered.contains("SECRET"),
+        "unknown payload fields leaked into the log message: {rendered}",
+    );
+}
+
+#[tokio::test]
+async fn responses_error_summary_truncates_long_messages() {
+    // Bound what a backend can push into a log line.
+    let long = "x".repeat(500);
+    let input = sse(&[&format!(
+        r#"{{"type":"error","code":"server_error","message":"{long}"}}"#
+    )]);
+    let err = buffer_responses_response(input.as_slice())
+        .await
+        .expect_err("error-only stream must error");
+
+    let rendered = err.to_string();
+    assert!(rendered.contains('…'), "expected truncation: {rendered}");
+    assert!(
+        rendered.matches('x').count() == 200,
+        "expected the message to be capped at 200 chars: {rendered}",
+    );
 }
