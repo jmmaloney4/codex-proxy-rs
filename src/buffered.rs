@@ -30,6 +30,49 @@ pub enum BufferError {
     Read(#[from] std::io::Error),
     #[error("failed to transform SSE event: {0}")]
     Transform(#[from] TransformError),
+    // The captured `error` event is the only diagnostic a truncated stream
+    // leaves behind, and the handler logs this through `Display` — so surface
+    // it here instead of leaving the field visible only to tests. Only the
+    // `code`/`message` pair is rendered; see `summarize_upstream_error`.
+    #[error("responses stream ended without a terminal response event{}",
+        .upstream_error.as_ref()
+            .map(summarize_upstream_error)
+            .unwrap_or_default())]
+    MissingTerminalEvent { upstream_error: Option<Value> },
+}
+
+/// Longest upstream `message` we will copy into a log line.
+const UPSTREAM_ERROR_MESSAGE_LIMIT: usize = 200;
+
+/// Render an upstream `error` event down to its `code`/`message` pair for
+/// logging.
+///
+/// The payload is backend-controlled JSON, and the ChatGPT Codex backend does
+/// not always use the OpenAI error shape (the bug that motivated forcing
+/// `stream: true` surfaced as `{"detail":"Stream must be set to true"}`). Some
+/// validation errors echo the offending request fragment back in `message`, so
+/// serializing the whole object would put arbitrary — potentially
+/// prompt-derived — content into operator logs, and unbounded content at that.
+///
+/// Extracting the two diagnostic fields keeps what an operator needs to act on
+/// while bounding both the shape and the size of what gets persisted. A payload
+/// carrying neither field renders as `unparseable` rather than being dumped.
+fn summarize_upstream_error(payload: &Value) -> String {
+    let code = payload.get("code").and_then(Value::as_str);
+    let message = payload.get("message").and_then(Value::as_str).map(|msg| {
+        match msg.char_indices().nth(UPSTREAM_ERROR_MESSAGE_LIMIT) {
+            Some((cutoff, _)) => format!("{}…", &msg[..cutoff]),
+            None => msg.to_string(),
+        }
+    });
+
+    let summary = match (code, message) {
+        (Some(code), Some(message)) => format!("{code}: {message}"),
+        (Some(code), None) => code.to_string(),
+        (None, Some(message)) => message,
+        (None, None) => "unparseable".to_string(),
+    };
+    format!(" (last upstream error: {summary})")
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -234,4 +277,53 @@ pub async fn buffer_chat_completion<R: AsyncBufRead + Unpin>(
         response["usage"] = usage;
     }
     Ok(response)
+}
+
+/// Responses-API stream events that carry the final `response` object. The
+/// object they wrap is byte-for-byte what OpenAI returns as the body of a
+/// non-streaming `POST /v1/responses`, so relaying it verbatim keeps the
+/// streaming and non-streaming shapes identical.
+const RESPONSES_TERMINAL_EVENTS: [&str; 3] = [
+    "response.completed",
+    "response.failed",
+    "response.incomplete",
+];
+
+/// Aggregate an upstream Responses-API SSE stream into the single response
+/// object a non-streaming caller expects.
+///
+/// Unlike [`buffer_chat_completion`] there is nothing to reconstruct: the
+/// terminal event already carries the complete response, so this only has to
+/// find it. `response.failed` and `response.incomplete` are terminal too — the
+/// Responses API reports both as a 200 whose body describes the failure, so
+/// surfacing them as a response (not an error) is the correct shape.
+///
+/// Frames that are not JSON (`[DONE]`) or carry no `type` are skipped, matching
+/// [`buffer_chat_completion`]'s tolerance for unexpected frames.
+pub async fn buffer_responses_response<R: AsyncBufRead + Unpin>(
+    upstream: R,
+) -> Result<Value, BufferError> {
+    let mut reader = SseEventReader::new(upstream);
+    // An upstream `error` event is not terminal on its own, but if the stream
+    // then ends without a response it is the only diagnostic we have.
+    let mut upstream_error: Option<Value> = None;
+
+    while let Some(event) = reader.next_event().await? {
+        let Ok(payload) = serde_json::from_slice::<Value>(&event) else {
+            continue;
+        };
+        let event_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
+        if event_type == "error" {
+            upstream_error = Some(payload);
+            continue;
+        }
+        if RESPONSES_TERMINAL_EVENTS.contains(&event_type)
+            && let Some(response) = payload.get("response")
+            && response.is_object()
+        {
+            return Ok(response.clone());
+        }
+    }
+
+    Err(BufferError::MissingTerminalEvent { upstream_error })
 }

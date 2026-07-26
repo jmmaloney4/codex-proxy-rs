@@ -135,6 +135,18 @@ tracing output: dev → pretty console, else JSON (Go logger parity).
    non-SSE bodies through. `content-encoding` is also stripped from
    mirrored headers (we never advertise accept-encoding; stale encodings
    would corrupt if decompression were ever enabled transitively).
+9. **`/v1/responses` accepts non-streaming callers.** Go forwards the
+   caller's `stream` field untouched, so any client that omits it (or sends
+   `false`) gets the ChatGPT backend's `{"detail":"Stream must be set to
+   true"}` 400 mirrored back — the backend's constraint leaking through a
+   surface that emulates the OpenAI Responses API, where streaming is
+   optional. This port forces `stream: true` upstream (as
+   `build_codex_request_body` already does for chat completions) and, when
+   the caller did not ask for a stream, returns the terminal event's
+   `response` object — which *is* the non-streaming body OpenAI defines, so
+   nothing is reconstructed. `response.failed`/`response.incomplete` are
+   terminal too; a stream that ends without one fails closed with a 500
+   rather than returning a partial object.
 
 ## Risks
 

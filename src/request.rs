@@ -519,6 +519,13 @@ pub fn transform_responses_request_body(
     let normalized_model = model::normalize_model(requested_model).to_string();
     obj.insert("model".to_string(), json!(normalized_model));
     obj.insert("store".to_string(), json!(false));
+    // The ChatGPT Codex backend rejects any Responses call that does not set
+    // `stream: true` (`{"detail":"Stream must be set to true"}`), but the
+    // OpenAI Responses API this endpoint emulates makes streaming optional.
+    // Force it on the way out — exactly as `build_codex_request_body` does for
+    // chat completions — and let the handler decide whether to relay the SSE or
+    // aggregate it back into a single response object for the caller.
+    obj.insert("stream".to_string(), json!(true));
 
     // Pull any top-level `instructions` aside; it is re-applied below.
     let mut user_instr = String::new();

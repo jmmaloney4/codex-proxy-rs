@@ -1,4 +1,4 @@
-use codex_proxy_rs::buffered::buffer_chat_completion;
+use codex_proxy_rs::buffered::{BufferError, buffer_chat_completion, buffer_responses_response};
 use pretty_assertions::assert_eq;
 
 fn sse(events: &[&str]) -> Vec<u8> {
@@ -145,4 +145,139 @@ async fn invalid_event_json_is_an_error() {
     let input = b"data: {not json\n\n".to_vec();
     let err = buffer_chat_completion(input.as_slice(), "gpt-5").await;
     assert!(err.is_err());
+}
+
+// ---- buffer_responses_response ------------------------------------------
+
+#[tokio::test]
+async fn responses_returns_the_completed_response_object_verbatim() {
+    let input = sse(&[
+        r#"{"type":"response.created","sequence_number":0,"response":{"id":"resp_1","status":"in_progress"}}"#,
+        r#"{"type":"response.output_text.delta","sequence_number":1,"delta":"Hello"}"#,
+        r#"{"type":"response.completed","sequence_number":2,"response":{"id":"resp_1","object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello"}]}],"usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}}"#,
+        "[DONE]",
+    ]);
+
+    let out = buffer_responses_response(input.as_slice())
+        .await
+        .expect("buffer succeeds");
+
+    // The terminal event's `response` is exactly the non-streaming body, so it
+    // must come back untouched — not re-derived from the deltas.
+    assert_eq!(out["id"], "resp_1");
+    assert_eq!(out["object"], "response");
+    assert_eq!(out["status"], "completed");
+    assert_eq!(out["output"][0]["content"][0]["text"], "Hello");
+    assert_eq!(out["usage"]["total_tokens"], 10);
+}
+
+#[tokio::test]
+async fn responses_treats_failed_and_incomplete_as_terminal() {
+    // The Responses API reports both as a 200 whose body describes the outcome,
+    // so they are responses to return, not errors to raise.
+    for status in ["failed", "incomplete"] {
+        let event = format!(
+            r#"{{"type":"response.{status}","response":{{"id":"resp_2","status":"{status}"}}}}"#
+        );
+        let input = sse(&[event.as_str()]);
+        let out = buffer_responses_response(input.as_slice())
+            .await
+            .unwrap_or_else(|err| panic!("{status} should buffer: {err}"));
+        assert_eq!(out["status"], status);
+    }
+}
+
+#[tokio::test]
+async fn responses_skips_non_json_and_untyped_frames() {
+    let input = sse(&[
+        "[DONE]",
+        r#"{"no_type_field":true}"#,
+        r#"{"type":"response.completed","response":{"id":"resp_3"}}"#,
+    ]);
+
+    let out = buffer_responses_response(input.as_slice())
+        .await
+        .expect("buffer succeeds");
+    assert_eq!(out["id"], "resp_3");
+}
+
+#[tokio::test]
+async fn responses_without_terminal_event_is_an_error() {
+    // A truncated stream must fail loudly rather than hand the caller a
+    // plausible-looking partial response.
+    let input = sse(&[r#"{"type":"response.created","response":{"id":"resp_4"}}"#]);
+    let err = buffer_responses_response(input.as_slice())
+        .await
+        .expect_err("truncated stream must error");
+    assert!(
+        matches!(
+            err,
+            BufferError::MissingTerminalEvent {
+                upstream_error: None
+            }
+        ),
+        "unexpected error: {err:?}",
+    );
+}
+
+#[tokio::test]
+async fn responses_error_event_is_retained_for_diagnostics() {
+    let input = sse(&[r#"{"type":"error","code":"server_error","message":"upstream exploded"}"#]);
+    let err = buffer_responses_response(input.as_slice())
+        .await
+        .expect_err("error-only stream must error");
+    // The handler logs this failure through `Display`, so the retained payload
+    // is only useful if it survives into the message an operator actually sees.
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("server_error: upstream exploded"),
+        "upstream diagnostic missing from the logged message: {rendered}",
+    );
+
+    let BufferError::MissingTerminalEvent {
+        upstream_error: Some(payload),
+    } = err
+    else {
+        panic!("expected the upstream error to be carried on the failure");
+    };
+    assert_eq!(payload["message"], "upstream exploded");
+}
+
+#[tokio::test]
+async fn responses_error_summary_omits_unknown_payload_fields() {
+    // The payload is backend-controlled and its `message` may echo request
+    // content, so only `code`/`message` are rendered — never the whole object.
+    let input = sse(&[concat!(
+        r#"{"type":"error","code":"server_error","message":"boom","#,
+        r#""prompt":"SECRET USER PROMPT","input":["SECRET TOOL ARGS"]}"#,
+    )]);
+    let err = buffer_responses_response(input.as_slice())
+        .await
+        .expect_err("error-only stream must error");
+
+    let rendered = err.to_string();
+    assert!(rendered.contains("server_error: boom"), "got: {rendered}");
+    assert!(
+        !rendered.contains("SECRET"),
+        "unknown payload fields leaked into the log message: {rendered}",
+    );
+}
+
+#[tokio::test]
+async fn responses_error_summary_truncates_long_messages() {
+    // Bound what a backend can push into a log line.
+    let long = "x".repeat(500);
+    let input = sse(&[&format!(
+        r#"{{"type":"error","code":"server_error","message":"{long}"}}"#
+    )]);
+    let err = buffer_responses_response(input.as_slice())
+        .await
+        .expect_err("error-only stream must error");
+
+    let rendered = err.to_string();
+    assert!(rendered.contains('…'), "expected truncation: {rendered}");
+    assert!(
+        rendered.matches('x').count() == 200,
+        "expected the message to be capped at 200 chars: {rendered}",
+    );
 }
