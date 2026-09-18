@@ -211,6 +211,77 @@ fn build_codex_request_gpt56_bare_alias_resolves_to_sol() {
 }
 
 #[test]
+fn build_codex_request_gpt6_astra_reaches_upstream_unmangled() {
+    // The point of the model: before it was known, "gpt-6-astra" fell through
+    // normalize_model's fallback and was sent upstream as "gpt-5" — a silent
+    // substitution the caller never saw.
+    let request = json!({
+        "model": "gpt-6-astra",
+        "messages": [
+            { "role": "user", "content": "Ship it" },
+        ],
+    });
+
+    let body = build_codex_request_body(&request);
+
+    assert_eq!(body["model"], json!("gpt-6-astra"));
+    // Upstream's default_reasoning_level for astra is low.
+    assert_eq!(body["reasoning"]["effort"], json!("low"));
+}
+
+#[test]
+fn build_codex_request_gpt6_astra_preserves_ultra_effort() {
+    let request = json!({
+        "model": "gpt-6-astra-ultra",
+        "messages": [
+            { "role": "user", "content": "Ship it" },
+        ],
+    });
+
+    let body = build_codex_request_body(&request);
+
+    assert_eq!(body["model"], json!("gpt-6-astra"));
+    assert_eq!(body["reasoning"]["effort"], json!("ultra"));
+}
+
+#[test]
+fn responses_gpt6_astra_effort_round_trip() {
+    let base = || {
+        json!({
+            "model": "gpt-6-astra",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "Hello" }],
+            }],
+        })
+    };
+
+    // max and ultra are the two levels above xhigh that astra accepts.
+    let mut b1 = base();
+    let (m1, e1) = transform_responses_request_body(&mut b1, "gpt-6-astra", "max");
+    assert_eq!(m1, "gpt-6-astra");
+    assert_eq!(e1, "max");
+    assert_eq!(b1["reasoning"]["effort"], json!("max"));
+
+    // The handler resolves the effort (including a `-<effort>` suffix on the
+    // model id) before calling this; the transform takes it as given, so the
+    // suffixed id and the explicit level must land on the same pair.
+    let mut b2 = base();
+    let (m2, e2) = transform_responses_request_body(&mut b2, "gpt-6-astra-ultra", "ultra");
+    assert_eq!(m2, "gpt-6-astra");
+    assert_eq!(e2, "ultra");
+    assert_eq!(b2["reasoning"]["effort"], json!("ultra"));
+
+    // minimal is not in astra's set and clamps to its default.
+    let mut b3 = base();
+    let (m3, e3) = transform_responses_request_body(&mut b3, "gpt-6-astra", "minimal");
+    assert_eq!(m3, "gpt-6-astra");
+    assert_eq!(e3, "low");
+    assert_eq!(b3["reasoning"]["effort"], json!("low"));
+}
+
+#[test]
 fn build_codex_request_maps_tools_and_no_tools_is_null() {
     let with_tools = json!({
         "model": "gpt-5",
