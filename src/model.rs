@@ -94,6 +94,17 @@ fn model_default_effort(model: &str) -> Option<&'static str> {
 
 // ── Public functions ─────────────────────────────────────────────────
 
+/// Whether an (already-lowercased) id names something in the gpt-6 family.
+///
+/// Deliberately narrower than `starts_with("gpt-6")`, which would also swallow
+/// `gpt-60` and `gpt-6experimental` and serve them as astra. Accepts the bare
+/// alias, the `gpt-6-<tier>` shape the 6 line uses today, and `gpt-6.<n>` so a
+/// future point release stays in its family instead of falling through to the
+/// generic gpt-5 fallback.
+fn is_gpt6_family(id: &str) -> bool {
+    id == "gpt-6" || id.starts_with("gpt-6-") || id.starts_with("gpt-6.")
+}
+
 /// The reasoning effort encoded in a model id's `-<effort>` suffix, if any.
 ///
 /// The read half of [`EFFORT_SUFFIXES`]; `normalize_model` is the strip half.
@@ -152,7 +163,7 @@ pub fn normalize_model(model: &str) -> &'static str {
     // that family rather than collapsing to the generic gpt-5 fallback at the
     // bottom of this function, which would silently serve a much weaker model.
     // The bare `gpt-6` / `gpt-5.6` aliases resolve to each family's flagship.
-    if lower.starts_with("gpt-6") {
+    if is_gpt6_family(lower) {
         return GPT6_ASTRA;
     }
     if lower == "gpt-5.6" || lower.starts_with("gpt-5.6-") {
@@ -731,6 +742,19 @@ mod tests {
         // as gpt-5 with no error to the caller.
         assert_eq!(normalize_model("gpt-6-nova"), GPT6_ASTRA);
         assert_ne!(normalize_model("gpt-6-nova"), GPT5);
+        // A future point release stays in the family too.
+        assert_eq!(normalize_model("gpt-6.1"), GPT6_ASTRA);
+        assert_eq!(normalize_model("gpt-6.1-nova"), GPT6_ASTRA);
+    }
+
+    #[test]
+    fn normalize_model_gpt6_guard_does_not_swallow_lookalikes() {
+        // `starts_with("gpt-6")` alone would route these to astra. They are not
+        // gpt-6 models, so they take the generic fallback like any other
+        // unknown id rather than being served as the family flagship.
+        for id in ["gpt-60", "gpt-6experimental", "gpt-64k"] {
+            assert_eq!(normalize_model(id), GPT5, "{id}");
+        }
     }
 
     #[test]
