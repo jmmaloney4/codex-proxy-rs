@@ -2694,6 +2694,48 @@
       "preview": false,
       "vendor": "OpenAI",
       "version": "gpt-5.6-luna"
+    },
+    {
+      "capabilities": {
+        "family": "gpt-6",
+        "limits": {
+          "max_context_window_tokens": 872000,
+          "max_output_tokens": 128000,
+          "max_prompt_tokens": 744000,
+          "vision": {
+            "max_prompt_image_size": 3145728,
+            "max_prompt_images": 1,
+            "supported_media_types": [
+              "image/jpeg",
+              "image/png",
+              "image/webp",
+              "image/gif"
+            ]
+          }
+        },
+        "object": "model_capabilities",
+        "supports": {
+          "parallel_tool_calls": true,
+          "streaming": true,
+          "structured_outputs": true,
+          "tool_calls": true,
+          "vision": true
+        },
+        "tokenizer": "o200k_base",
+        "type": "chat"
+      },
+      "id": "gpt-6-astra",
+      "model_picker_category": "versatile",
+      "model_picker_enabled": true,
+      "name": "GPT-6-Astra",
+      "object": "model",
+      "policy": {
+        "state": "enabled",
+        "terms": "Enable access to GPT-6-Astra from OpenAI. [Learn more about how GitHub Copilot serves GPT-6-Astra](https://gh.io/copilot-openai)."
+      },
+      "preview": false,
+      "vendor": "OpenAI",
+      "version": "gpt-6-astra"
     }
   ]
 }

@@ -37,7 +37,7 @@ async fn models_served_verbatim_without_spark() {
     let parsed: Value = serde_json::from_str(MODELS_JSON).expect("valid json");
     assert_eq!(parsed["object"], "list");
     let data = parsed["data"].as_array().expect("data array");
-    assert_eq!(data.len(), 62);
+    assert_eq!(data.len(), 63);
 
     let ids: Vec<&str> = data.iter().map(|m| m["id"].as_str().unwrap()).collect();
     // Spark is not-planned (ADR 004) and filtered from the dump.
@@ -56,6 +56,8 @@ async fn models_served_verbatim_without_spark() {
         "gpt-5.6-sol",
         "gpt-5.6-terra",
         "gpt-5.6-luna",
+        // gpt-6 family.
+        "gpt-6-astra",
     ] {
         assert!(ids.contains(&expected), "missing {expected}");
     }

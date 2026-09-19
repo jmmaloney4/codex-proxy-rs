@@ -20,10 +20,16 @@ pub const UPSTREAM_URL: &str = "https://chatgpt.com/backend-api/codex/responses"
 /// header is too old.
 ///
 /// This default tracks `numtide/llm-agents.nix`'s `packages/codex` version
-/// (currently 0.144.6), which mirrors the latest `openai/codex` release, but
+/// (currently 0.155.0), which mirrors the latest `openai/codex` release, but
 /// operators can override it at runtime via `CODEX_PROXY_CODEX_CLI_VERSION` /
 /// `--codex-cli-version`.
-pub const DEFAULT_CODEX_CLI_VERSION: &str = "0.144.6";
+///
+/// `gpt-6-astra` entered the bundled catalog in openai/codex #42607
+/// (2026-09-03, first shipped in 0.154.0), so 0.155.0 clears the version gate
+/// for it. The exact minimum the *backend* enforces is not published; if a
+/// future model 400s with "requires a newer version of Codex", bump this (or
+/// the env override) rather than patching call sites.
+pub const DEFAULT_CODEX_CLI_VERSION: &str = "0.155.0";
 
 #[derive(Debug, thiserror::Error)]
 pub enum UpstreamError {

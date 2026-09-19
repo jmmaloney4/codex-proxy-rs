@@ -81,11 +81,11 @@ pub(crate) fn resolve_reasoning_effort(request: &Value) -> String {
         }
     }
     if let Some(model_str) = request.get("model").and_then(Value::as_str) {
-        let lower = model_str.trim().to_lowercase();
-        for effort in ["xhigh", "high", "medium", "low", "minimal"] {
-            if lower.ends_with(&format!("-{effort}")) {
-                return effort.to_string();
-            }
+        // Single source of truth for the suffix vocabulary; this used to keep
+        // its own copy of the effort list, which then silently disagreed with
+        // model.rs the moment either side gained a level.
+        if let Some(effort) = model::effort_suffix(model_str) {
+            return effort.to_string();
         }
     }
     String::new()
