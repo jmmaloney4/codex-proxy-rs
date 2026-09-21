@@ -152,6 +152,112 @@ async fn does_not_pin_when_the_repin_target_also_fails() {
     assert_eq!(pod_b.hit_count(), 1);
 }
 
+// ---- issue #23: model-tier-gate 400s reroute to a sibling account ----
+
+fn tier_gate_body(model: &str) -> String {
+    json!({
+        "detail": format!(
+            "The '{model}' model is not supported when using Codex with a ChatGPT account"
+        ),
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn reroutes_on_model_tier_gate_400() {
+    // "a" doesn't have entitlement for gpt-5.4 on its ChatGPT plan; "b" does.
+    // This must behave like the 429 case above: reroute, and pin the
+    // conversation to the account that actually worked.
+    let pod_a =
+        MockUpstream::start(vec![MockResponse::Status(400, tier_gate_body("gpt-5.4"))]).await;
+    let pod_b = MockUpstream::start(vec![MockResponse::Sse("data: from-b\n\n".into())]).await;
+
+    let affinity = Arc::new(InMemoryAffinityStore::default());
+    let spec = format!("a={},b={}", pod_a.url, pod_b.url);
+    let app = router(router_state(&spec, Some(affinity.clone())));
+
+    let resp = app.oneshot(chat_req(&convo())).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_string(resp.into_body()).await, "data: from-b\n\n");
+
+    assert_eq!(
+        pod_a.hit_count(),
+        1,
+        "the tier-gated account was tried once"
+    );
+    assert_eq!(
+        pod_b.hit_count(),
+        1,
+        "then re-pinned to the entitled account"
+    );
+
+    let key = resolve_conversation_key(&HeaderMap::new(), &convo())
+        .unwrap()
+        .key;
+    assert_eq!(affinity.get(&key).await.unwrap().slug, "b");
+}
+
+#[tokio::test]
+async fn a_genuine_400_is_not_rerouted() {
+    // A real bad request (not a tier-gate) is a request problem, not an
+    // account problem — no sibling would answer it any differently, so it
+    // must pass straight through without touching "b" at all.
+    let body = json!({"detail": "Invalid request: missing required field 'messages'"}).to_string();
+    let pod_a = MockUpstream::start(vec![MockResponse::Status(400, body.clone())]).await;
+    let pod_b = MockUpstream::start(vec![MockResponse::Sse("data: from-b\n\n".into())]).await;
+
+    let affinity = Arc::new(InMemoryAffinityStore::default());
+    let spec = format!("a={},b={}", pod_a.url, pod_b.url);
+    let app = router(router_state(&spec, Some(affinity.clone())));
+
+    let resp = app.oneshot(chat_req(&convo())).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_string(resp.into_body()).await, body);
+
+    assert_eq!(pod_a.hit_count(), 1);
+    assert_eq!(pod_b.hit_count(), 0, "a genuine 400 must not reroute");
+
+    // A terminal (non-retryable) response still pins, matching every other
+    // terminal status — this one just happens to be an error.
+    let key = resolve_conversation_key(&HeaderMap::new(), &convo())
+        .unwrap()
+        .key;
+    assert_eq!(affinity.get(&key).await.unwrap().slug, "a");
+}
+
+#[tokio::test]
+async fn does_not_pin_when_both_accounts_tier_gate_the_model() {
+    // Neither account's ChatGPT plan includes gpt-5.4: the router tries one,
+    // reroutes to the other, and when that also tier-gates it must NOT pin
+    // (else future turns route to an account that structurally can't serve
+    // this model) — but still streams the real 400 to the client.
+    let pod_a =
+        MockUpstream::start(vec![MockResponse::Status(400, tier_gate_body("gpt-5.4"))]).await;
+    let pod_b =
+        MockUpstream::start(vec![MockResponse::Status(400, tier_gate_body("gpt-5.4"))]).await;
+
+    let affinity = Arc::new(InMemoryAffinityStore::default());
+    let spec = format!("a={},b={}", pod_a.url, pod_b.url);
+    let app = router(router_state(&spec, Some(affinity.clone())));
+
+    let resp = app.oneshot(chat_req(&convo())).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_string(resp.into_body()).await,
+        tier_gate_body("gpt-5.4")
+    );
+
+    let key = resolve_conversation_key(&HeaderMap::new(), &convo())
+        .unwrap()
+        .key;
+    assert!(
+        affinity.get(&key).await.is_none(),
+        "must not pin a conversation to an account that tier-gates the model",
+    );
+    assert_eq!(pod_a.hit_count(), 1);
+    assert_eq!(pod_b.hit_count(), 1);
+}
+
 #[tokio::test]
 async fn forwards_w3c_trace_context_to_the_pod() {
     // The pod's spans must nest in the router's trace, so traceparent is

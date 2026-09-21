@@ -12,9 +12,9 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::extract::State;
-use axum::http::{HeaderMap, Uri};
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::Response;
 use serde_json::Value;
 
@@ -22,7 +22,7 @@ use crate::affinity::Pin;
 use crate::conversation::resolve_conversation_key;
 use crate::server::AppState;
 use crate::server::error::ApiError;
-use crate::server::stream::proxy_response;
+use crate::server::stream::{proxy_response, sanitized_headers};
 
 /// How long a slug is skipped for new picks after it returns 429/5xx.
 const COOLDOWN: Duration = Duration::from_secs(60);
@@ -41,6 +41,12 @@ pub struct AccountPool {
     accounts: Vec<Account>,
     next: AtomicUsize,
     cooldown_until: Mutex<HashMap<String, Instant>>,
+    /// Cooldown scoped to (slug, model) rather than the whole account: a
+    /// model-tier-gate 400 means this account structurally does not support
+    /// this model, not that the account itself is unhealthy. Cooling the
+    /// account globally would incorrectly deprioritize it for models it DOES
+    /// support (issue #23).
+    model_cooldown_until: Mutex<HashMap<(String, String), Instant>>,
 }
 
 impl AccountPool {
@@ -107,6 +113,7 @@ impl AccountPool {
             accounts,
             next: AtomicUsize::new(0),
             cooldown_until: Mutex::new(HashMap::new()),
+            model_cooldown_until: Mutex::new(HashMap::new()),
         })
     }
 
@@ -134,40 +141,79 @@ impl AccountPool {
             .insert(slug.to_string(), Instant::now() + COOLDOWN);
     }
 
-    /// The pinned account, if `slug` is known and not currently cooling.
-    pub fn pinned(&self, slug: &str) -> Option<Account> {
-        if self.is_cooling(slug) {
+    fn is_model_cooling(&self, slug: &str, model: &str) -> bool {
+        if model.is_empty() {
+            return false;
+        }
+        self.model_cooldown_until
+            .lock()
+            .unwrap()
+            .get(&(slug.to_string(), model.to_string()))
+            .is_some_and(|until| *until > Instant::now())
+    }
+
+    /// Mark a (slug, model) pair as cooling after a model-tier-gate 400 (this
+    /// account's ChatGPT plan does not include that model) — see
+    /// `is_model_cooling`. A no-op for an empty model string, which would
+    /// otherwise let requests with no `model` field pollute the cooldown map
+    /// with a meaningless `(slug, "")` entry.
+    pub fn cooldown_model(&self, slug: &str, model: &str) {
+        if model.is_empty() {
+            return;
+        }
+        self.model_cooldown_until.lock().unwrap().insert(
+            (slug.to_string(), model.to_string()),
+            Instant::now() + COOLDOWN,
+        );
+    }
+
+    /// The pinned account, if `slug` is known and not currently cooling —
+    /// account-wide, or for this specific `model` (issue #23).
+    pub fn pinned(&self, slug: &str, model: &str) -> Option<Account> {
+        if self.is_cooling(slug) || self.is_model_cooling(slug, model) {
             return None;
         }
         self.accounts.iter().find(|a| a.slug == slug).cloned()
     }
 
     /// Pick an account for a new (or re-pinned) conversation: round-robin over
-    /// healthy accounts, skipping `exclude`. Falls back to ignoring cooldown,
-    /// then to any account, so a request is never dropped for lack of a pick.
-    pub fn pick(&self, exclude: Option<&str>) -> Option<Account> {
+    /// healthy accounts, skipping `exclude` and any account known to
+    /// tier-gate `model`. Falls back to ignoring the (transient) account-wide
+    /// cooldown, then to any account, so a request is never dropped for lack
+    /// of a pick — but a model-tier-gate is a structural fact, not a transient
+    /// blip, so it is never ignored while a healthier pick might still exist
+    /// (issue #23).
+    pub fn pick(&self, exclude: Option<&str>, model: &str) -> Option<Account> {
         let n = self.accounts.len();
         if n == 0 {
             return None;
         }
         let start = self.next.fetch_add(1, Ordering::Relaxed);
-        // Pass 1: healthy and not excluded.
+        // Pass 1: healthy (account- and model-wise) and not excluded.
         for i in 0..n {
             let a = &self.accounts[(start + i) % n];
-            if Some(a.slug.as_str()) == exclude || self.is_cooling(&a.slug) {
+            if Some(a.slug.as_str()) == exclude
+                || self.is_cooling(&a.slug)
+                || self.is_model_cooling(&a.slug, model)
+            {
                 continue;
             }
             return Some(a.clone());
         }
-        // Pass 2: not excluded (cooldown ignored — better to try than fail).
+        // Pass 2: not excluded, account-cooldown ignored (better to try than
+        // fail), but a known tier-gate is still skipped — retrying it can
+        // only fail again.
         for i in 0..n {
             let a = &self.accounts[(start + i) % n];
-            if Some(a.slug.as_str()) == exclude {
+            if Some(a.slug.as_str()) == exclude || self.is_model_cooling(&a.slug, model) {
                 continue;
             }
             return Some(a.clone());
         }
-        // Pass 3: only the excluded account remains.
+        // Pass 3: every account either is excluded or tier-gates `model` —
+        // still return something so a request is never dropped for lack of a
+        // pick (the caller will see the real, correct 400 if truly no
+        // account supports this model).
         self.accounts.first().cloned()
     }
 }
@@ -204,6 +250,118 @@ async fn proxy_to_pod(
 
 fn is_retryable(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+/// Substring identifying a model-tier-gate 400 from the ChatGPT backend — an
+/// account-capability fact ("this ChatGPT plan doesn't include this model"),
+/// not a request problem (issue #23). Matched as a substring of the raw body
+/// regardless of JSON envelope shape: there is no stable machine-readable
+/// error code to key on, mirroring how this crate already treats the
+/// backend's other bespoke error bodies (`request.rs`'s `{"detail": "..."}`
+/// handling for the stream-flag and `user`-param rejections).
+const TIER_GATE_MARKER: &str = "model is not supported when using Codex with a ChatGPT account";
+
+/// A 400 response whose body has already been read to classify it. Building
+/// the final `Response` is deferred to `into_response` so the caller can
+/// decide first whether to emit it or discard it in favor of a retry.
+struct Buffered400 {
+    headers: HeaderMap,
+    body: Bytes,
+    /// Whether the body matched `TIER_GATE_MARKER`. `false` also covers the
+    /// (very rare) case where the body failed to read — see `classify_400`.
+    tier_gate: bool,
+}
+
+impl Buffered400 {
+    fn into_response(self) -> Response {
+        let mut response = Response::new(Body::from(self.body));
+        *response.status_mut() = StatusCode::BAD_REQUEST;
+        *response.headers_mut() = self.headers;
+        response
+    }
+}
+
+/// Read and classify a 400 response's body. A body-read failure degrades to
+/// "not a tier-gate" (terminal, empty body) rather than a guess either way:
+/// we genuinely don't know, and treating an unreadable body as retryable
+/// risks a reroute loop on a connection that is already misbehaving.
+async fn classify_400(resp: reqwest::Response) -> Buffered400 {
+    let headers = sanitized_headers(resp.headers());
+    let body = resp.bytes().await.unwrap_or_default();
+    let tier_gate = String::from_utf8_lossy(&body).contains(TIER_GATE_MARKER);
+    Buffered400 {
+        headers,
+        body,
+        tier_gate,
+    }
+}
+
+/// Material to fall back to if a sibling-account retry also fails or can't be
+/// attempted: either the primary's still-unconsumed response (429/5xx —
+/// stream lazily, unchanged from before issue #23) or its already-buffered
+/// body (a model-tier-gate 400 — the body was read to classify it, so it must
+/// be replayed from the buffer instead of re-streamed).
+enum FallbackBody {
+    Response(reqwest::Response),
+    Buffered(Buffered400),
+}
+
+impl FallbackBody {
+    fn into_response(self) -> Response {
+        match self {
+            FallbackBody::Response(resp) => proxy_response(resp),
+            FallbackBody::Buffered(buffered) => buffered.into_response(),
+        }
+    }
+}
+
+/// `Ok` mirrors the two "we have something to emit" cases above; `Err` is a
+/// primary attempt that failed to connect at all.
+type Fallback = Result<FallbackBody, reqwest::Error>;
+
+/// The outcome of one attempt against one account.
+enum Primary {
+    /// Ready to return now — success, or a terminal (non-retryable,
+    /// non-tier-gate) status.
+    Terminal(Response),
+    /// Not final: 429/5xx/connection-error (account-wide problem) or a
+    /// model-tier-gate 400 (this (slug, model) pairing only — `tier_gate`).
+    Retry { fallback: Fallback, tier_gate: bool },
+}
+
+/// Classify a completed attempt. Only a 400 needs its body read (to tell a
+/// genuine bad request apart from a model-tier-gate entitlement error); every
+/// other status is decided from the status line alone, exactly as before
+/// issue #23.
+async fn classify(result: Result<reqwest::Response, reqwest::Error>) -> Primary {
+    let resp = match result {
+        Ok(resp) => resp,
+        Err(err) => {
+            return Primary::Retry {
+                fallback: Err(err),
+                tier_gate: false,
+            };
+        }
+    };
+    if resp.status() == reqwest::StatusCode::BAD_REQUEST {
+        let buffered = classify_400(resp).await;
+        return if buffered.tier_gate {
+            Primary::Retry {
+                fallback: Ok(FallbackBody::Buffered(buffered)),
+                tier_gate: true,
+            }
+        } else {
+            Primary::Terminal(buffered.into_response())
+        };
+    }
+    if is_retryable(resp.status()) {
+        Primary::Retry {
+            fallback: Ok(FallbackBody::Response(resp)),
+            tier_gate: false,
+        }
+    } else {
+        Primary::Terminal(proxy_response(resp))
+    }
 }
 
 /// Router-mode handler for `/v1/chat/completions` and `/v1/responses`: resolve
@@ -251,10 +409,10 @@ pub async fn proxy(
     };
 
     // Primary account: the live pin if usable, else a fresh pick.
-    let (account, mut source) = match pinned_slug.as_deref().and_then(|s| pool.pinned(s)) {
+    let (account, mut source) = match pinned_slug.as_deref().and_then(|s| pool.pinned(s, &model)) {
         Some(a) => (a, "pinned"),
         None => (
-            pool.pick(None)
+            pool.pick(None, &model)
                 .ok_or(ApiError::Internal("router mode: account pool is empty"))?,
             if state.affinity.is_some() {
                 "new"
@@ -273,63 +431,94 @@ pub async fn proxy(
         body.clone(),
     )
     .await;
-    let first_ok_terminal = matches!(&first, Ok(resp) if !is_retryable(resp.status()));
 
-    if first_ok_terminal {
-        maybe_pin(&state, &conversation_key, &account.slug, &model, source).await;
-        let resp = first.expect("checked Ok");
-        log_route(
-            &conversation_key_fp,
-            &account.slug,
-            source,
-            resp.status().as_u16(),
-        );
-        return Ok(proxy_response(resp));
+    let (fallback, tier_gate) = match classify(first).await {
+        Primary::Terminal(response) => {
+            maybe_pin(&state, &conversation_key, &account.slug, &model, source).await;
+            log_route(
+                &conversation_key_fp,
+                &account.slug,
+                source,
+                response.status().as_u16(),
+            );
+            return Ok(response);
+        }
+        Primary::Retry {
+            fallback,
+            tier_gate,
+        } => (fallback, tier_gate),
+    };
+
+    // Primary failed: 429/5xx/connection-error is an account-wide problem —
+    // cool the whole account, as before. A model-tier-gate 400 is scoped to
+    // this (slug, model) pairing only (issue #23).
+    if tier_gate {
+        pool.cooldown_model(&account.slug, &model);
+    } else {
+        pool.cooldown(&account.slug);
     }
-
-    // Primary failed (429/5xx or connection error) → cool it down, re-pin once.
-    pool.cooldown(&account.slug);
     if let (Some(store), Some(key)) = (&state.affinity, &conversation_key) {
         store.clear(key).await;
     }
 
-    match pool.pick(Some(&account.slug)) {
+    match pool.pick(Some(&account.slug), &model) {
         // A genuinely different account is available — try it.
         Some(alt) if alt.slug != account.slug => {
-            match proxy_to_pod(&state.http, &alt.url, &target, &bearer, &headers, body).await {
+            let alt_result =
+                proxy_to_pod(&state.http, &alt.url, &target, &bearer, &headers, body).await;
+            match classify(alt_result).await {
                 // Only pin the alt if it actually succeeded — pinning a target
-                // that *also* returned 429/5xx would route future turns to a
-                // failing account. If it failed too, cool it down and leave the
-                // conversation unpinned (the next turn re-picks); still stream
-                // the response so the client sees the real upstream status.
-                Ok(resp) if !is_retryable(resp.status()) => {
+                // that *also* failed would route future turns to a failing
+                // account.
+                Primary::Terminal(response) => {
                     source = "repinned";
                     maybe_pin(&state, &conversation_key, &alt.slug, &model, source).await;
                     log_route(
                         &conversation_key_fp,
                         &alt.slug,
                         source,
-                        resp.status().as_u16(),
+                        response.status().as_u16(),
                     );
-                    Ok(proxy_response(resp))
+                    Ok(response)
                 }
-                Ok(resp) => {
-                    pool.cooldown(&alt.slug);
-                    log_route(
-                        &conversation_key_fp,
-                        &alt.slug,
-                        "repin_failed",
-                        resp.status().as_u16(),
-                    );
-                    Ok(proxy_response(resp))
+                // The sibling failed too — cool it down at the same scope as
+                // the primary above, leave the conversation unpinned (the
+                // next turn re-picks); still surface a response so the client
+                // sees the real upstream status.
+                Primary::Retry {
+                    fallback: alt_fallback,
+                    tier_gate: alt_tier_gate,
+                } => {
+                    // Matches the pre-#23 asymmetry: only a completed (not
+                    // connection-failed) attempt cools the alt down — a
+                    // pod we couldn't even reach tells us nothing to cool.
+                    if alt_fallback.is_ok() {
+                        if alt_tier_gate {
+                            pool.cooldown_model(&alt.slug, &model);
+                        } else {
+                            pool.cooldown(&alt.slug);
+                        }
+                    }
+                    match alt_fallback {
+                        Err(err) => {
+                            fallback_or_error(fallback, &conversation_key_fp, &account.slug, err)
+                        }
+                        Ok(body) => {
+                            let response = body.into_response();
+                            log_route(
+                                &conversation_key_fp,
+                                &alt.slug,
+                                "repin_failed",
+                                response.status().as_u16(),
+                            );
+                            Ok(response)
+                        }
+                    }
                 }
-                // Re-pin send failed: stream the first response if we have one,
-                // else surface a gateway error.
-                Err(err) => fallback_or_error(first, &conversation_key_fp, &account.slug, err),
             }
         }
         // Only one account in the pool — nothing to fail over to.
-        _ => fallback_or_error_single(first, &conversation_key_fp, &account.slug),
+        _ => fallback_or_error_single(fallback, &conversation_key_fp, &account.slug),
     }
 }
 
@@ -368,21 +557,22 @@ fn log_route(conversation_key_fp: &str, slug: &str, source: &str, status: u16) {
 }
 
 fn fallback_or_error(
-    first: Result<reqwest::Response, reqwest::Error>,
+    first: Fallback,
     conversation_key_fp: &str,
     first_slug: &str,
     repin_err: reqwest::Error,
 ) -> Result<Response, ApiError> {
     match first {
-        Ok(resp) => {
+        Ok(body) => {
             tracing::warn!(error = %repin_err, "re-pin send failed; streaming primary response");
+            let response = body.into_response();
             log_route(
                 conversation_key_fp,
                 first_slug,
                 "repin_failed",
-                resp.status().as_u16(),
+                response.status().as_u16(),
             );
-            Ok(proxy_response(resp))
+            Ok(response)
         }
         Err(first_err) => {
             tracing::error!(primary = %first_err, repin = %repin_err, "router: both accounts unreachable");
@@ -392,16 +582,23 @@ fn fallback_or_error(
 }
 
 fn fallback_or_error_single(
-    first: Result<reqwest::Response, reqwest::Error>,
+    first: Fallback,
     conversation_key_fp: &str,
     slug: &str,
 ) -> Result<Response, ApiError> {
     match first {
         // Single-account pool: stream whatever the one account returned (even a
-        // 429/5xx) rather than fail — the client sees the real upstream status.
-        Ok(resp) => {
-            log_route(conversation_key_fp, slug, "single", resp.status().as_u16());
-            Ok(proxy_response(resp))
+        // 429/5xx, or an already-buffered tier-gate 400) rather than fail —
+        // the client sees the real upstream status.
+        Ok(body) => {
+            let response = body.into_response();
+            log_route(
+                conversation_key_fp,
+                slug,
+                "single",
+                response.status().as_u16(),
+            );
+            Ok(response)
         }
         Err(first_err) => {
             tracing::error!(error = %first_err, "router: only account unreachable");
@@ -418,9 +615,9 @@ mod tests {
     fn parses_account_spec() {
         let p = AccountPool::parse(" main=http://a:9879 , codex2=http://b:9879/ ").unwrap();
         assert_eq!(p.len(), 2);
-        assert_eq!(p.pinned("main").unwrap().url, "http://a:9879");
+        assert_eq!(p.pinned("main", "").unwrap().url, "http://a:9879");
         // trailing slash trimmed
-        assert_eq!(p.pinned("codex2").unwrap().url, "http://b:9879");
+        assert_eq!(p.pinned("codex2", "").unwrap().url, "http://b:9879");
     }
 
     #[test]
@@ -445,14 +642,14 @@ mod tests {
     #[test]
     fn pinned_returns_none_for_unknown_or_cooling() {
         let p = AccountPool::parse("main=http://a,codex2=http://b").unwrap();
-        assert!(p.pinned("nope").is_none());
-        assert!(p.pinned("main").is_some());
+        assert!(p.pinned("nope", "").is_none());
+        assert!(p.pinned("main", "").is_some());
         p.cooldown("main");
         assert!(
-            p.pinned("main").is_none(),
+            p.pinned("main", "").is_none(),
             "cooling slug is not a valid pin"
         );
-        assert!(p.pinned("codex2").is_some());
+        assert!(p.pinned("codex2", "").is_some());
     }
 
     #[test]
@@ -461,10 +658,10 @@ mod tests {
         p.cooldown("a");
         // Over several picks, never returns the cooling account 'a'.
         for _ in 0..10 {
-            assert_ne!(p.pick(None).unwrap().slug, "a");
+            assert_ne!(p.pick(None, "").unwrap().slug, "a");
         }
         // Excluding 'b' while 'a' cools leaves only 'c' as healthy.
-        assert_eq!(p.pick(Some("b")).unwrap().slug, "c");
+        assert_eq!(p.pick(Some("b"), "").unwrap().slug, "c");
     }
 
     #[test]
@@ -473,6 +670,59 @@ mod tests {
         p.cooldown("a");
         p.cooldown("b");
         // No healthy accounts, but a pick is still returned (pass 2).
-        assert!(p.pick(None).is_some());
+        assert!(p.pick(None, "").is_some());
+    }
+
+    // ---- issue #23: model-tier-gate cooldown is scoped, not account-wide ----
+
+    #[test]
+    fn model_cooldown_is_scoped_to_the_pairing_not_the_whole_account() {
+        let p = AccountPool::parse("a=http://a,b=http://b").unwrap();
+        p.cooldown_model("a", "gpt-6-astra");
+        // "a" is unusable for the tier-gated model...
+        assert!(p.pinned("a", "gpt-6-astra").is_none());
+        // ...but still perfectly fine for any other model, unlike the
+        // account-wide `cooldown` above.
+        assert!(p.pinned("a", "gpt-5.6-luna").is_some());
+        assert!(p.pinned("a", "").is_some());
+    }
+
+    #[test]
+    fn cooldown_model_is_a_noop_for_an_empty_model() {
+        let p = AccountPool::parse("a=http://a").unwrap();
+        p.cooldown_model("a", "");
+        assert!(
+            p.pinned("a", "").is_some(),
+            "an empty model must never be cooled down"
+        );
+    }
+
+    #[test]
+    fn pick_skips_a_model_tier_gate_but_still_picks_the_account_for_other_models() {
+        let p = AccountPool::parse("a=http://a,b=http://b").unwrap();
+        p.cooldown_model("a", "gpt-6-astra");
+        // Every pick for the tier-gated model must land on "b".
+        for _ in 0..10 {
+            assert_eq!(p.pick(None, "gpt-6-astra").unwrap().slug, "b");
+        }
+        // But "a" is still in rotation for a different model.
+        let mut saw_a = false;
+        for _ in 0..10 {
+            if p.pick(None, "gpt-5.6-luna").unwrap().slug == "a" {
+                saw_a = true;
+            }
+        }
+        assert!(saw_a, "model cooldown must not leak into other models");
+    }
+
+    #[test]
+    fn pick_never_ignores_a_model_tier_gate_even_when_all_cool() {
+        let p = AccountPool::parse("a=http://a,b=http://b").unwrap();
+        p.cooldown_model("a", "gpt-6-astra");
+        p.cooldown_model("b", "gpt-6-astra");
+        // Unlike the transient account-wide cooldown (pass 2 ignores it), a
+        // structural tier-gate is never worth retrying — but a pick is still
+        // returned so a request is never dropped for lack of one.
+        assert!(p.pick(None, "gpt-6-astra").is_some());
     }
 }

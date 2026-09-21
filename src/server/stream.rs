@@ -34,7 +34,11 @@ pub fn response_reader(resp: reqwest::Response) -> impl AsyncBufRead + Unpin {
 /// `content-encoding` (this client never advertises accept-encoding, and if
 /// a transitive feature ever enables reqwest decompression, forwarding the
 /// stale encoding would corrupt the already-decoded body).
-fn sanitized_headers(upstream: &HeaderMap) -> HeaderMap {
+///
+/// `pub(crate)`: router mode (issue #23) needs this when it buffers a 400 to
+/// classify it, before it has a `Response` to build with the usual helpers
+/// below.
+pub(crate) fn sanitized_headers(upstream: &HeaderMap) -> HeaderMap {
     let mut headers = HeaderMap::new();
     for (name, value) in upstream {
         if matches!(
