@@ -608,6 +608,16 @@ pub fn transform_responses_request_body(
     obj.remove("max_output_tokens");
     obj.remove("max_tokens");
 
+    // The ChatGPT Codex backend rejects any top-level `user` field with
+    // `{"detail":"Unsupported parameter: user"}`. LiteLLM's Anthropic-Messages
+    // -> Responses-API bridge synthesizes this from `metadata.user_id` on every
+    // promoted request, so any caller with active `reasoning_effort` + tools on
+    // a gpt-5.4+ deployment sends it upstream unconditionally. `user` carries no
+    // meaning here regardless — see `conversation::resolve_conversation_key`,
+    // which already treats it as a per-end-user id rather than a conversation
+    // key. jmmaloney4/garden#2150.
+    obj.remove("user");
+
     let normalized_effort = model::normalize_reasoning_effort(requested_effort);
     let clamped_effort =
         model::clamp_reasoning_effort_for_model(normalized_effort, &normalized_model);

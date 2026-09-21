@@ -422,6 +422,21 @@ fn responses_removes_max_tokens_fields() {
 }
 
 #[test]
+fn responses_removes_user_field() {
+    // The ChatGPT Codex backend rejects any top-level `user` field with
+    // {"detail":"Unsupported parameter: user"}. LiteLLM's Responses-API
+    // bridge synthesizes it from metadata.user_id on every promoted
+    // request, so it must be stripped before forwarding. jmmaloney4/garden#2150.
+    let mut body = json!({
+        "instructions": "test",
+        "input": [],
+        "user": "user-field-id",
+    });
+    let (_m, _e) = transform_responses_request_body(&mut body, "gpt-5", "");
+    assert!(body.get("user").is_none());
+}
+
+#[test]
 fn responses_reasoning_effort_removed() {
     let mut body = json!({
         "instructions": "test",
