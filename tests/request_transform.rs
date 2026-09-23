@@ -729,3 +729,135 @@ fn cache_key_golden_case_4_multiline() {
         "525b7dac-915e-569e-8f68-bdb832259f87"
     );
 }
+
+// ── /v1/responses whitelist (jmmaloney4/codex-proxy-rs#19) ────────────
+
+/// The whitelist as pinned by `src/request.rs::CODEX_RESPONSES_KEYS`,
+/// duplicated here on purpose: this module is the drift guard, so an edit to
+/// either spelling must fail a test until both move together.
+const PINNED_RESPONSES_WHITELIST: [&str; 11] = [
+    "model",
+    "instructions",
+    "store",
+    "stream",
+    "input",
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
+    "reasoning",
+    "include",
+    "prompt_cache_key",
+];
+
+#[test]
+fn responses_whitelist_matches_chat_path_key_set() {
+    // The whitelist is defined as "the key set build_codex_request_body
+    // emits" — the backend's proven accept-list. Two assertions close the
+    // loop completely: the const equals this module's pinned copy, and the
+    // chat path's emitted keys equal that copy too — so const, pinned copy,
+    // and proven surface cannot silently diverge in any direction.
+    assert_eq!(
+        codex_proxy_rs::request::CODEX_RESPONSES_KEYS,
+        PINNED_RESPONSES_WHITELIST,
+        "CODEX_RESPONSES_KEYS and its pinned test copy diverged"
+    );
+
+    let request = json!({
+        "model": "gpt-5",
+        "messages": [{ "role": "user", "content": "hello" }],
+        "tools": [
+            { "type": "function", "name": "get_weather",
+              "parameters": { "type": "object", "properties": {} } }
+        ],
+        "tool_choice": "auto",
+        "parallel_tool_calls": false,
+        "reasoning_effort": "high",
+    });
+    let chat_body = build_codex_request_body(&request);
+    let mut chat_keys: Vec<&str> = chat_body
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    chat_keys.sort_unstable();
+    let mut pinned: Vec<&str> = PINNED_RESPONSES_WHITELIST.to_vec();
+    pinned.sort_unstable();
+    assert_eq!(chat_keys, pinned);
+}
+
+#[test]
+fn responses_whitelist_strips_unknown_client_params() {
+    // Full-parameter outbound shape captured empirically from LiteLLM
+    // 1.83.0's Anthropic-Messages -> Responses bridge (spike evidence on
+    // jmmaloney4/codex-proxy-rs#19): the bridge emits at most `model, input,
+    // instructions, max_output_tokens, reasoning{effort}, stream,
+    // temperature, tool_choice, tools, user`. `user` is rejected by the
+    // backend (garden#2150); `temperature` / `max_output_tokens` are not
+    // honored for gpt-5.x reasoning models — the whitelist drops all three
+    // by construction instead of a delete-list learning them one mirrored
+    // 400 at a time. `safety_identifier`, `metadata`, and `text` were never
+    // bridge fields; they are here to prove unknown keys cannot survive.
+    let mut body = json!({
+        "model": "gpt-5",
+        "instructions": "captured bridge instructions",
+        "input": [
+            { "role": "user", "content": [{ "type": "input_text", "text": "spike probe" }] }
+        ],
+        "max_output_tokens": 2048,
+        "reasoning": { "effort": "minimal" },
+        "stream": true,
+        "temperature": 1,
+        "tool_choice": { "type": "auto" },
+        "tools": [
+            { "type": "function", "name": "get_weather",
+              "parameters": { "type": "object", "properties": {} } }
+        ],
+        "user": "user_acct_8817c26019484c2b9f5e7d3a1b6c8d0e_outer_scope_padding_t",
+        "safety_identifier": "operator-id",
+        "metadata": { "user_id": "operator-id" },
+        "text": { "verbosity": "low" },
+    });
+    // "minimal" is what `resolve_reasoning_effort` extracts from the nested
+    // `reasoning.effort` above — the handler passes it in as the param.
+    let (_m, _e) = transform_responses_request_body(&mut body, "gpt-5", "minimal");
+
+    let out = body.as_object().unwrap();
+    let mut out_keys: Vec<&str> = out.keys().map(|k| k.as_str()).collect();
+    out_keys.sort_unstable();
+    let mut pinned: Vec<&str> = PINNED_RESPONSES_WHITELIST.to_vec();
+    pinned.sort_unstable();
+    assert_eq!(out_keys, pinned);
+
+    for dropped in [
+        "user",
+        "temperature",
+        "max_output_tokens",
+        "safety_identifier",
+        "metadata",
+        "text",
+    ] {
+        assert!(out.get(dropped).is_none(), "{dropped} should be stripped");
+    }
+    // Bridge-dependent pass-throughs survive the whitelist intact.
+    assert_eq!(out["tool_choice"], json!({ "type": "auto" }));
+    assert_eq!(out["reasoning"]["effort"], json!("minimal"));
+    assert_eq!(out["stream"], json!(true));
+    assert_eq!(out["store"], json!(false));
+}
+
+#[test]
+fn responses_temperature_is_deliberately_stripped() {
+    // Recorded decision (jmmaloney4/codex-proxy-rs#19): LiteLLM's bridge
+    // forwards `temperature` on the captured outbound shape, but gpt-5.x
+    // reasoning models do not honor it, and whether the Codex backend
+    // accepts it is unproven. Stripping is intended behavior, pinned here so
+    // it reads as a decision rather than an accident.
+    let mut body = json!({
+        "instructions": "test",
+        "input": [],
+        "temperature": 0.2,
+    });
+    let (_m, _e) = transform_responses_request_body(&mut body, "gpt-5", "");
+    assert!(body.get("temperature").is_none());
+}
