@@ -505,6 +505,32 @@ pub fn build_codex_request_body(request: &Value) -> Value {
     Value::Object(body)
 }
 
+/// The Codex backend's accepted Responses surface: the key set
+/// `build_codex_request_body` emits for chat completions (proven in
+/// production), which is the shape the real Codex CLI sends. Anything else a
+/// client includes is dropped before forwarding — the backend rejects unknown
+/// parameters with a mirrored 400 (`Unsupported parameter: user`,
+/// jmmaloney4/garden#2150), so a delete-list learns the backend's accept-list
+/// one production incident at a time (#19). Notably absent on purpose:
+/// `user` (bridge-synthesized from LiteLLM's `metadata.user_id`, rejected
+/// upstream), `temperature` and `max_output_tokens` (not honored for gpt-5.x
+/// reasoning models), and `reasoning_effort` (folded into `reasoning` above).
+/// Exported so the integration-test drift guard can assert it directly
+/// against both its pinned copy and `build_codex_request_body`'s output.
+pub const CODEX_RESPONSES_KEYS: [&str; 11] = [
+    "model",
+    "instructions",
+    "store",
+    "stream",
+    "input",
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
+    "reasoning",
+    "include",
+    "prompt_cache_key",
+];
+
 /// Port of Go `transformResponsesRequestBody`: rewrite a Responses API request
 /// body in place. Returns `(normalized_model, clamped_effort)`.
 pub fn transform_responses_request_body(
@@ -605,19 +631,6 @@ pub fn transform_responses_request_body(
         obj.insert("parallel_tool_calls".to_string(), json!(false));
     }
 
-    obj.remove("max_output_tokens");
-    obj.remove("max_tokens");
-
-    // The ChatGPT Codex backend rejects any top-level `user` field with
-    // `{"detail":"Unsupported parameter: user"}`. LiteLLM's Anthropic-Messages
-    // -> Responses-API bridge synthesizes this from `metadata.user_id` on every
-    // promoted request, so any caller with active `reasoning_effort` + tools on
-    // a gpt-5.4+ deployment sends it upstream unconditionally. `user` carries no
-    // meaning here regardless — see `conversation::resolve_conversation_key`,
-    // which already treats it as a per-end-user id rather than a conversation
-    // key. jmmaloney4/garden#2150.
-    obj.remove("user");
-
     let normalized_effort = model::normalize_reasoning_effort(requested_effort);
     let clamped_effort =
         model::clamp_reasoning_effort_for_model(normalized_effort, &normalized_model);
@@ -635,8 +648,6 @@ pub fn transform_responses_request_body(
         obj.insert("reasoning".to_string(), Value::Object(reasoning_settings));
     }
 
-    obj.remove("reasoning_effort");
-
     if obj
         .get("prompt_cache_key")
         .and_then(Value::as_str)
@@ -653,6 +664,24 @@ pub fn transform_responses_request_body(
             obj.insert("prompt_cache_key".to_string(), json!(key));
         }
     }
+
+    // Whitelist last, so it also catches anything inserted above that is not
+    // in CODEX_RESPONSES_KEYS (there currently is none — the array and this
+    // function's inserts must stay in sync). Dropped names are logged at
+    // debug, so a client field silently losing capability against the backend
+    // is observable instead of invisible.
+    let dropped: Vec<&str> = obj
+        .keys()
+        .filter(|k| !CODEX_RESPONSES_KEYS.contains(&k.as_str()))
+        .map(|k| k.as_str())
+        .collect();
+    if !dropped.is_empty() {
+        tracing::debug!(
+            dropped = ?dropped,
+            "stripped /v1/responses fields outside the Codex whitelist"
+        );
+    }
+    obj.retain(|k, _| CODEX_RESPONSES_KEYS.contains(&k.as_str()));
 
     (normalized_model, clamped_effort)
 }
