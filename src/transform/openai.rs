@@ -55,24 +55,43 @@ pub struct Usage {
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
     pub total_tokens: i64,
+    /// Present only when upstream reported a cache split (see
+    /// `UpstreamUsage::to_openai`). Absent means "unknown", not "zero".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
+    /// Present only when upstream reported a reasoning-token count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_tokens_details: Option<CompletionTokensDetails>,
+}
+
+/// OpenAI `usage.prompt_tokens_details`. The count is not optional: a details
+/// object without its count cannot be constructed, so it is never emitted empty.
+#[derive(Debug, Serialize)]
+pub struct PromptTokensDetails {
+    pub cached_tokens: i64,
+}
+
+/// OpenAI `usage.completion_tokens_details`.
+#[derive(Debug, Serialize)]
+pub struct CompletionTokensDetails {
+    pub reasoning_tokens: i64,
 }
 
 impl Usage {
     pub fn new(prompt_tokens: i64, completion_tokens: i64) -> Self {
-        Self {
-            prompt_tokens,
-            completion_tokens,
-            total_tokens: prompt_tokens + completion_tokens,
-        }
+        Self::with_total(prompt_tokens, completion_tokens, None)
     }
 
     /// Create a Usage with an explicit total_tokens from upstream,
     /// falling back to computed `prompt_tokens + completion_tokens`.
+    /// No token details; see `UpstreamUsage::to_openai` for those.
     pub fn with_total(prompt_tokens: i64, completion_tokens: i64, total: Option<i64>) -> Self {
         Self {
             prompt_tokens,
             completion_tokens,
             total_tokens: total.unwrap_or(prompt_tokens + completion_tokens),
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
         }
     }
 }

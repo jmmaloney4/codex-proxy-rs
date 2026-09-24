@@ -37,6 +37,41 @@ async fn aggregates_text_finish_and_usage() {
 }
 
 #[tokio::test]
+async fn non_streaming_carries_cached_and_reasoning_token_details() {
+    let input = sse(&[
+        r#"{"type":"response.created","sequence_number":0,"response":{"id":"resp_1"}}"#,
+        r#"{"type":"response.output_text.delta","sequence_number":1,"delta":"ok"}"#,
+        r#"{"type":"response.completed","sequence_number":2,"response":{"usage":{"input_tokens":1200,"input_tokens_details":{"cached_tokens":1024},"output_tokens":30,"output_tokens_details":{"reasoning_tokens":16},"total_tokens":1230}}}"#,
+        "[DONE]",
+    ]);
+    let out = buffer_chat_completion(input.as_slice(), "gpt-5.4")
+        .await
+        .expect("buffer succeeds");
+
+    assert_eq!(out["usage"]["prompt_tokens"], 1200);
+    assert_eq!(out["usage"]["prompt_tokens_details"]["cached_tokens"], 1024);
+    assert_eq!(
+        out["usage"]["completion_tokens_details"]["reasoning_tokens"],
+        16
+    );
+}
+
+#[tokio::test]
+async fn non_streaming_omits_unreported_token_details() {
+    let input = sse(&[
+        r#"{"type":"response.created","sequence_number":0,"response":{"id":"resp_1"}}"#,
+        r#"{"type":"response.completed","sequence_number":1,"response":{"usage":{"input_tokens":7,"output_tokens":3}}}"#,
+        "[DONE]",
+    ]);
+    let out = buffer_chat_completion(input.as_slice(), "gpt-5.4")
+        .await
+        .expect("buffer succeeds");
+
+    assert!(out["usage"].get("prompt_tokens_details").is_none());
+    assert!(out["usage"].get("completion_tokens_details").is_none());
+}
+
+#[tokio::test]
 async fn aggregates_reasoning_summary_into_reasoning_content() {
     // Reasoning summary deltas precede the visible answer; the buffered response
     // must surface them as `message.reasoning_content`, mirroring the streaming

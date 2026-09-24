@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::openai::{CompletionTokensDetails, PromptTokensDetails, Usage};
+
 /// Minimal envelope extracted before variant dispatch.
 /// We do NOT use `#[serde(tag = "type")]` because reasoning events
 /// require prefix matching on the type string (e.g. `response.reasoning*`).
@@ -50,8 +52,9 @@ pub struct CompletedResponse {
 }
 
 /// Upstream usage payload.
-/// Codex uses `input_tokens`/`output_tokens`; OpenAI uses
-/// `prompt_tokens`/`completion_tokens`. We accept both.
+/// Codex uses `input_tokens`/`output_tokens` (+ `*_tokens_details`); OpenAI
+/// chat-completions uses `prompt_tokens`/`completion_tokens`
+/// (+ `*_tokens_details`). We accept both spellings.
 #[derive(Debug, Deserialize)]
 pub struct UpstreamUsage {
     #[serde(default)]
@@ -64,16 +67,67 @@ pub struct UpstreamUsage {
     pub input_tokens: Option<i64>,
     #[serde(default)]
     pub output_tokens: Option<i64>,
+    #[serde(default)]
+    pub input_tokens_details: Option<UpstreamInputDetails>,
+    #[serde(default)]
+    pub prompt_tokens_details: Option<UpstreamInputDetails>,
+    #[serde(default)]
+    pub output_tokens_details: Option<UpstreamOutputDetails>,
+    #[serde(default)]
+    pub completion_tokens_details: Option<UpstreamOutputDetails>,
+}
+
+/// `input_tokens_details` / `prompt_tokens_details`: only the cache split is
+/// carried; other keys are ignored.
+#[derive(Debug, Default, Deserialize)]
+pub struct UpstreamInputDetails {
+    #[serde(default)]
+    pub cached_tokens: Option<i64>,
+}
+
+/// `output_tokens_details` / `completion_tokens_details`: only the reasoning
+/// count is carried; other keys are ignored.
+#[derive(Debug, Default, Deserialize)]
+pub struct UpstreamOutputDetails {
+    #[serde(default)]
+    pub reasoning_tokens: Option<i64>,
 }
 
 impl UpstreamUsage {
-    /// Returns `(prompt_tokens, completion_tokens, total_tokens)`.
-    /// Prefers explicit upstream values; falls back to computed defaults.
-    pub fn to_openai(&self) -> (i64, i64, Option<i64>) {
+    /// Converts to the OpenAI chat-completions usage object.
+    ///
+    /// Prefers explicit upstream values; `total_tokens` falls back to
+    /// `prompt + completion`. The detail objects are emitted only when
+    /// upstream actually reported the count: downstream ledgers treat the
+    /// presence of `prompt_tokens_details.cached_tokens` as "cache split
+    /// known", so an unreported split must stay absent, never become `0`.
+    pub fn to_openai(&self) -> Usage {
         let pt = self.prompt_tokens.or(self.input_tokens).unwrap_or(0);
         let ct = self.completion_tokens.or(self.output_tokens).unwrap_or(0);
-        let tt = self.total_tokens;
-        (pt, ct, tt)
+        let cached = self
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|d| d.cached_tokens)
+            .or_else(|| {
+                self.input_tokens_details
+                    .as_ref()
+                    .and_then(|d| d.cached_tokens)
+            });
+        let reasoning = self
+            .completion_tokens_details
+            .as_ref()
+            .and_then(|d| d.reasoning_tokens)
+            .or_else(|| {
+                self.output_tokens_details
+                    .as_ref()
+                    .and_then(|d| d.reasoning_tokens)
+            });
+        let mut usage = Usage::with_total(pt, ct, self.total_tokens);
+        usage.prompt_tokens_details =
+            cached.map(|cached_tokens| PromptTokensDetails { cached_tokens });
+        usage.completion_tokens_details =
+            reasoning.map(|reasoning_tokens| CompletionTokensDetails { reasoning_tokens });
+        usage
     }
 }
 

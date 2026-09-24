@@ -244,6 +244,74 @@ fn transforms_completed_event_into_final_chunk_with_usage() {
     );
 }
 
+// --- completed with cache/reasoning token details (garden#2185) ---
+
+fn completed_usage_chunk(usage_json: &str) -> Value {
+    let mut transformer = SSETransformer::new("");
+    transformer.response_id = "chatcmpl-resp_123".to_string();
+    let input = format!(
+        r#"{{"type":"response.completed","sequence_number":92,"response":{{"usage":{usage_json}}}}}"#
+    );
+    let result = transformer
+        .transform(input.as_bytes())
+        .expect("transform succeeds");
+    let chunk: Value = serde_json::from_slice(&emitted_bytes(result)).expect("valid json");
+    chunk["usage"].clone()
+}
+
+#[rstest]
+fn completed_carries_cached_and_reasoning_token_details() {
+    let usage = completed_usage_chunk(
+        r#"{"input_tokens":1200,"input_tokens_details":{"cached_tokens":1024},"output_tokens":300,"output_tokens_details":{"reasoning_tokens":256},"total_tokens":1500}"#,
+    );
+    assert_eq!(
+        usage,
+        json!({
+            "prompt_tokens": 1200,
+            "completion_tokens": 300,
+            "total_tokens": 1500,
+            "prompt_tokens_details": {"cached_tokens": 1024},
+            "completion_tokens_details": {"reasoning_tokens": 256}
+        })
+    );
+}
+
+#[rstest]
+fn completed_carries_reported_zero_cached_tokens() {
+    // A reported 0 is a known split (no cache hit) and must survive.
+    let usage = completed_usage_chunk(
+        r#"{"input_tokens":10,"input_tokens_details":{"cached_tokens":0},"output_tokens":5}"#,
+    );
+    assert_eq!(usage["prompt_tokens_details"], json!({"cached_tokens": 0}));
+    assert!(usage.get("completion_tokens_details").is_none());
+}
+
+#[rstest]
+fn completed_accepts_openai_spelled_token_details() {
+    let usage = completed_usage_chunk(
+        r#"{"prompt_tokens":10,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens":5,"completion_tokens_details":{"reasoning_tokens":2}}"#,
+    );
+    assert_eq!(usage["prompt_tokens_details"], json!({"cached_tokens": 4}));
+    assert_eq!(
+        usage["completion_tokens_details"],
+        json!({"reasoning_tokens": 2})
+    );
+}
+
+#[rstest]
+#[case::details_absent(r#"{"input_tokens":10,"output_tokens":5}"#)]
+#[case::details_null(r#"{"input_tokens":10,"input_tokens_details":null,"output_tokens":5,"output_tokens_details":null}"#)]
+#[case::details_empty(
+    r#"{"input_tokens":10,"input_tokens_details":{},"output_tokens":5,"output_tokens_details":{}}"#
+)]
+fn completed_omits_token_details_upstream_did_not_report(#[case] usage_json: &str) {
+    // Absent must stay absent: ledgers read key presence as "split known",
+    // so a fabricated 0 would misprice the row.
+    let usage = completed_usage_chunk(usage_json);
+    assert!(usage.get("prompt_tokens_details").is_none(), "{usage}");
+    assert!(usage.get("completion_tokens_details").is_none(), "{usage}");
+}
+
 // --- completed with upstream total_tokens ---
 
 #[rstest]

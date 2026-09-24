@@ -271,10 +271,7 @@ impl SSETransformer {
 
         // Always emit usage: prefer upstream values, fall back to zeroed.
         let usage = match payload.response.usage.as_ref() {
-            Some(u) => {
-                let (pt, ct, tt) = u.to_openai();
-                Usage::with_total(pt, ct, tt)
-            }
+            Some(u) => u.to_openai(),
             None => Usage::new(0, 0),
         };
 
